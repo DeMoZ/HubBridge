@@ -551,7 +551,14 @@ impl Agent {
                             let permit = Arc::clone(&in_flight).acquire_owned().await.expect("semaphore open");
                             let out = out_tx.clone();
                             tokio::spawn(async move {
-                                let msg = fut.await;
+                                // A panic in a backend must still answer the host.
+                                let msg = match tokio::spawn(fut).await {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        warn!("USB request failed inside the agent: {e}");
+                                        Message::Error { code: ErrorCode::Internal, message: format!("agent error: {e}") }
+                                    }
+                                };
                                 let _ = out.send(Frame { req, msg });
                                 drop(permit);
                             });

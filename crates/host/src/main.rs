@@ -108,6 +108,12 @@ enum UsbCmd {
         /// Read this many MiB from the start of the drive and report the speed.
         #[arg(long)]
         bench: Option<u64>,
+        /// KiB per USB transfer in the data phase (all in flight together).
+        #[arg(long, default_value_t = 64)]
+        chunk_kib: u32,
+        /// KiB per SCSI READ(10) command.
+        #[arg(long, default_value_t = 1024)]
+        command_kib: u32,
     },
 }
 
@@ -156,12 +162,19 @@ async fn usb(cmd: UsbCmd, store: &mut Store) -> Result<()> {
             );
             c.close().await;
         }
-        UsbCmd::Storage { id, target, bench } => {
+        UsbCmd::Storage {
+            id,
+            target,
+            bench,
+            chunk_kib,
+            command_kib,
+        } => {
             let c = connect(target.as_deref(), store).await?;
             let info = device_info(&c, id).await?;
             let mut ms = hubbridge_host::msc::MassStorage::open(&c, &info)
                 .await
                 .map_err(permission_hint)?;
+            ms.chunk = chunk_kib.clamp(1, 1024) * 1024;
             let res = async {
                 let inq = ms.inquiry().await?;
                 println!(
@@ -179,7 +192,9 @@ async fn usb(cmd: UsbCmd, store: &mut Store) -> Result<()> {
                     cap.block_size
                 );
                 if let Some(mib) = bench {
-                    let r = ms.bench(cap, mib * 1024 * 1024).await?;
+                    let r = ms
+                        .bench(cap, mib * 1024 * 1024, Some(command_kib.max(1) * 1024))
+                        .await?;
                     println!(
                         "read {:.1} MiB in {:.2} s: {:.1} MB/s over {}",
                         r.bytes as f64 / 1048576.0,

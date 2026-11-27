@@ -163,11 +163,22 @@ fn usb_backend(cb: Arc<JavaCallbacks>) -> Arc<dyn hubbridge_agent::usb::UsbBacke
 
 fn init_logging() {
     #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("HubBridge"),
-    );
+    {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("HubBridge"),
+        );
+        // Rust panics go to stderr, which Android drops: send them to logcat too.
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(|| {
+            let default = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                log::error!("panic: {info}");
+                default(info);
+            }));
+        });
+    }
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {

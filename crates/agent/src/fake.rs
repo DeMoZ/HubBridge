@@ -26,6 +26,8 @@ pub enum FakeKind {
     MassStorage { blocks: u32 },
     /// Only control transfers (descriptors).
     DescriptorsOnly,
+    /// Opening panics: tests that a fault inside the agent still answers the host.
+    PanicOnOpen,
 }
 
 struct FakeEntry {
@@ -70,6 +72,9 @@ impl UsbBackend for FakeUsb {
     fn open(&self, id: u32) -> BoxFut<Result<Arc<dyn UsbDevice>, UsbError>> {
         let res = match self.devices.lock().unwrap().get(&id) {
             None => Err(UsbError::NotFound),
+            Some(e) if matches!(e.kind, FakeKind::PanicOnOpen) => {
+                return Box::pin(async move { panic!("fake backend: open of device {id} panics") });
+            }
             Some(e) if !e.permitted => Err(UsbError::NoPermission("allow USB access on the phone".into())),
             Some(e) => Ok(Arc::new(FakeDevice {
                 state: Arc::new(Mutex::new(State {
@@ -254,7 +259,9 @@ impl State {
                     self.msc_csw.take().map(|csw| TransferResult::ok_in(csw.to_vec()))
                 }
             }
-            (FakeKind::DescriptorsOnly, _) => Some(TransferResult::failed(UsbStatus::InvalidArgument)),
+            (FakeKind::DescriptorsOnly | FakeKind::PanicOnOpen, _) => {
+                Some(TransferResult::failed(UsbStatus::InvalidArgument))
+            }
         }
     }
 }

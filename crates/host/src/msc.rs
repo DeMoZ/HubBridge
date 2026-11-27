@@ -59,6 +59,8 @@ pub struct MassStorage<'a> {
     ep_in: u8,
     ep_out: u8,
     tag: u32,
+    /// Size of each IN transfer of a data phase (they are all in flight together).
+    pub chunk: u32,
 }
 
 fn is_csw(d: &[u8], tag: u32) -> bool {
@@ -98,6 +100,7 @@ impl<'a> MassStorage<'a> {
             ep_in,
             ep_out,
             tag: 1,
+            chunk: CHUNK,
         };
         // A drive just taken from the phone often reports UNIT ATTENTION once.
         for _ in 0..3 {
@@ -157,17 +160,17 @@ impl<'a> MassStorage<'a> {
             let mut pending = Vec::new();
             let mut left = data_len;
             while left > 0 {
-                let n = left.min(CHUNK);
-                pending.push(
-                    self.client
-                        .submit_transfer(self.id, self.ep_in, n, Vec::new(), TIMEOUT)
-                        .await?,
-                );
+                let n = left.min(self.chunk);
+                let p = self
+                    .client
+                    .submit_transfer(self.id, self.ep_in, n, Vec::new(), TIMEOUT)
+                    .await?;
+                pending.push((n, p));
                 left -= n;
             }
             let mut short = false;
             let mut stalled = false;
-            for p in pending {
+            for (n, p) in pending {
                 let r = p.wait().await?;
                 if short || stalled {
                     if early_csw.is_none() && r.status == UsbStatus::Ok && is_csw(&r.data, tag) {
@@ -177,7 +180,7 @@ impl<'a> MassStorage<'a> {
                 }
                 match r.status {
                     UsbStatus::Ok => {
-                        short = (r.data.len() as u32) < CHUNK;
+                        short = (r.data.len() as u32) < n;
                         data.extend_from_slice(&r.data);
                     }
                     UsbStatus::Stall => stalled = true,
@@ -270,8 +273,9 @@ impl<'a> MassStorage<'a> {
     }
 
     /// Sequential read of `bytes` from the start of the drive.
-    pub async fn bench(&mut self, cap: Capacity, bytes: u64) -> Result<BenchResult> {
-        let per_cmd = (READ_COMMAND / cap.block_size).max(1) as u16;
+    /// Sequential read with `command_bytes` per READ(10) (default [`READ_COMMAND`]).
+    pub async fn bench(&mut self, cap: Capacity, bytes: u64, command_bytes: Option<u32>) -> Result<BenchResult> {
+        let per_cmd = (command_bytes.unwrap_or(READ_COMMAND) / cap.block_size).clamp(1, 65535) as u16;
         let total_blocks = (bytes / cap.block_size as u64).min(cap.blocks);
         let start = Instant::now();
         let mut lba: u64 = 0;

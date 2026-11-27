@@ -32,6 +32,7 @@ async fn setup() -> (Agent, std::net::SocketAddr, Store) {
         fixtures::cp2102_uart(1),
         fixtures::without_permission(fixtures::hid_keyboard(2)),
         fixtures::flash_drive(3),
+        fixtures::cp2102_uart(4),
     ]);
     let usb = FakeUsb::new();
     usb.add(
@@ -55,6 +56,7 @@ async fn setup() -> (Agent, std::net::SocketAddr, Store) {
         FakeKind::MassStorage { blocks: 4096 },
         true,
     );
+    usb.add(4, fixtures::cp2102_raw(), &[], FakeKind::PanicOnOpen, true);
     agent.set_usb_backend(usb);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -171,9 +173,52 @@ async fn mass_storage_read() {
     }
     // Past the end: the drive fails the command, the next one still works.
     assert!(ms.read(4095, 2, 512).await.is_err());
-    let r = ms.bench(cap, 2 * 1024 * 1024).await.unwrap();
+    let r = ms.bench(cap, 2 * 1024 * 1024, None).await.unwrap();
     assert_eq!(r.bytes, 2 * 1024 * 1024);
     ms.close().await.unwrap();
     // Closed: it can be opened again.
     c.open_device(3).await.unwrap();
+}
+
+#[tokio::test]
+async fn spec_edge_cases() {
+    let (_agent, addr, mut store) = setup().await;
+    let c = Client::connect(&[addr], &mut store).await.unwrap();
+
+    // 5.2: a panic inside the agent still answers, with Internal; the session survives.
+    let e = c.open_device(4).await.unwrap_err();
+    assert_eq!(agent_code(&e), Some(ErrorCode::Internal), "{e:#}");
+    c.ping(1).await.unwrap();
+
+    // 6.3: not a drive: refused before the device is opened, so it can be opened after.
+    let uart = c.list_devices().await.unwrap().into_iter().find(|d| d.id == 1).unwrap();
+    let e = MassStorage::open(&c, &uart).await.err().unwrap();
+    assert!(format!("{e:#}").contains("not a USB mass-storage device"), "{e:#}");
+    c.open_device(1).await.unwrap();
+    c.claim_interface(1, 0, false).await.unwrap();
+
+    // 6.1: more than 1 MiB in one transfer.
+    let e = c.transfer(1, 0x81, 2 * 1024 * 1024, vec![], T).await.unwrap_err();
+    assert_eq!(agent_code(&e), Some(ErrorCode::Unsupported));
+
+    // 6.2: more requests in flight than the 256 the agent keeps pending: none dropped.
+    let mut pending = Vec::new();
+    for _ in 0..300 {
+        pending.push(
+            c.submit_transfer(1, 0x81, 64, vec![], Duration::from_millis(300))
+                .await
+                .unwrap(),
+        );
+    }
+    let mut answered = 0;
+    for p in pending {
+        assert_eq!(p.wait().await.unwrap().status, UsbStatus::Cancelled);
+        answered += 1;
+    }
+    assert_eq!(answered, 300);
+
+    // 6.4: recovery requests.
+    c.clear_halt(1, 0x81).await.unwrap();
+    c.reset_device(1).await.unwrap();
+    c.close_device(1).await.unwrap();
 }
