@@ -1,8 +1,11 @@
 //! Step 2 end to end over real TCP: host client ↔ agent core ↔ fake USB devices.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
+use common::PausableProxy;
 use hubbridge_agent::fake::{FakeKind, FakeUsb, block_byte};
 use hubbridge_agent::{Agent, AgentConfig};
 use hubbridge_host::client::AgentError;
@@ -221,4 +224,68 @@ async fn spec_edge_cases() {
     c.clear_halt(1, 0x81).await.unwrap();
     c.reset_device(1).await.unwrap();
     c.close_device(1).await.unwrap();
+}
+
+/// Requests that are dropped while the host's socket is full must not damage the session
+/// (GitHub issue #7): the agent decrypts every frame and the session stays open.
+#[tokio::test]
+async fn session_survives_dropped_submits_on_full_socket() {
+    let (agent, addr, mut store) = setup().await;
+    let proxy = PausableProxy::start(addr).await;
+    let c = std::sync::Arc::new(Client::connect(&[proxy.addr()], &mut store).await.unwrap());
+    let mut events = c.take_events().unwrap();
+    c.ping(1).await.unwrap();
+    assert_eq!(agent.status().sessions.len(), 1);
+
+    proxy.pause();
+    let mut accepted = Vec::new();
+    let mut expired = false;
+    for _ in 0..400 {
+        let msg = Message::Transfer {
+            id: 999,
+            endpoint: 0x01,
+            length: 0,
+            data: vec![0x5A; 64 * 1024],
+            timeout_ms: 1000,
+        };
+        match tokio::time::timeout(Duration::from_millis(200), c.submit(msg)).await {
+            Ok(p) => accepted.push(p.unwrap()),
+            Err(_) => {
+                expired = true;
+                break;
+            }
+        }
+    }
+    assert!(expired, "the socket never filled up");
+    // Another caller blocked in submit is aborted.
+    let c2 = c.clone();
+    let blocked = tokio::spawn(async move {
+        let _ = c2
+            .submit(Message::Transfer {
+                id: 999,
+                endpoint: 0x01,
+                length: 0,
+                data: vec![0x5A; 64 * 1024],
+                timeout_ms: 1000,
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    blocked.abort();
+    assert!(blocked.await.unwrap_err().is_cancelled());
+
+    proxy.resume();
+    for p in accepted {
+        let e = p.wait(Duration::from_secs(30)).await.unwrap_err();
+        assert_eq!(agent_code(&e), Some(ErrorCode::NotOpen), "{e:#}");
+    }
+    c.ping(2).await.unwrap();
+    assert!(!c.list_devices().await.unwrap().is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .is_err(),
+        "no Disconnected event expected"
+    );
+    assert_eq!(agent.status().sessions.len(), 1);
 }

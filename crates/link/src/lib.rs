@@ -20,6 +20,11 @@
 //! Record layer: `u16` big-endian length + body. In the session each body is one Noise
 //! message (≤ 65535 bytes). An application message is a `u32` big-endian length followed by
 //! the postcard bytes, split over as many records as needed.
+//!
+//! The sender is cancel-safe: all records of a message are encrypted into a buffer
+//! first, and a send that is dropped part way leaves the unwritten rest in that buffer, to
+//! be finished by the next `send` / `send_bytes` / `shutdown`. The nonce sequence and the
+//! byte stream the peer sees are therefore never corrupted by a dropped future.
 
 use std::io;
 use std::sync::Arc;
@@ -169,6 +174,10 @@ pub struct SecureSender<W> {
     w: W,
     transport: Arc<StatelessTransportState>,
     nonce: u64,
+    /// Encrypted records not yet fully written (left over from a dropped send).
+    out: Vec<u8>,
+    /// Bytes of `out` already written.
+    done: usize,
 }
 
 /// Receiving half of an established session.
@@ -179,12 +188,21 @@ pub struct SecureReceiver<R> {
 }
 
 impl<W: AsyncWrite + Unpin> SecureSender<W> {
+    /// Encode and send one frame. Cancel-safe, see [`SecureSender::send_bytes`].
     pub async fn send(&mut self, frame: &Frame) -> Result<(), LinkError> {
         let bytes = proto::encode(frame)?;
         self.send_bytes(&bytes).await
     }
 
+    /// Send one message (split into records as needed).
+    ///
+    /// Cancel-safe: if the future is dropped, the message is either not started or will be
+    /// finished by the next `send` / `send_bytes` / `shutdown`; the record stream is never
+    /// corrupted. A dropped send may therefore still be delivered later. After an I/O error
+    /// the sender must not be used again.
     pub async fn send_bytes(&mut self, data: &[u8]) -> Result<(), LinkError> {
+        // Finish what an earlier, dropped send left behind, before anything new.
+        self.drain().await?;
         if data.len() > MAX_MESSAGE_LEN {
             return Err(LinkError::TooLarge(data.len()));
         }
@@ -192,22 +210,51 @@ impl<W: AsyncWrite + Unpin> SecureSender<W> {
         plain.extend_from_slice(&(data.len() as u32).to_be_bytes());
         plain.extend_from_slice(data);
 
+        // Encrypt everything first: an encryption error leaves `out` and the nonce untouched.
         let chunks = plain.len().div_ceil(MAX_PLAIN);
-        let mut out = Vec::with_capacity(plain.len() + chunks * (2 + TAG_LEN));
+        let mut enc = Vec::with_capacity(plain.len() + chunks * (2 + TAG_LEN));
+        let mut nonce = self.nonce;
         let mut ct = vec![0u8; NOISE_MAX];
         for chunk in plain.chunks(MAX_PLAIN) {
-            let n = self.transport.write_message(self.nonce, chunk, &mut ct)?;
-            self.nonce += 1;
-            out.extend_from_slice(&(n as u16).to_be_bytes());
-            out.extend_from_slice(&ct[..n]);
+            let n = self.transport.write_message(nonce, chunk, &mut ct)?;
+            nonce += 1;
+            enc.extend_from_slice(&(n as u16).to_be_bytes());
+            enc.extend_from_slice(&ct[..n]);
         }
-        self.w.write_all(&out).await?;
+        // From here the bytes are committed: the nonces are taken and the records sit in
+        // `out`, which is written before anything else.
+        self.nonce = nonce;
+        self.out = enc;
+        self.done = 0;
+        self.drain().await
+    }
+
+    /// Write `out[done..]`, flush, and clear the buffer. Dropping it part way is fine:
+    /// `done` only advances after a successful `write`, and a repeated flush is harmless.
+    async fn drain(&mut self) -> Result<(), LinkError> {
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        while self.done < self.out.len() {
+            let n = self.w.write(&self.out[self.done..]).await?;
+            if n == 0 {
+                return Err(LinkError::Io(io::ErrorKind::WriteZero.into()));
+            }
+            self.done += n;
+        }
         self.w.flush().await?;
+        // Release the buffer: a large message's capacity is not kept for the session.
+        self.out = Vec::new();
+        self.done = 0;
         Ok(())
     }
 
-    /// Best-effort orderly shutdown of the write side.
+    /// Best-effort orderly shutdown of the write side: first finishes the bytes a dropped
+    /// send left behind, flushes, then shuts the write side down. Cancel-safe (a dropped
+    /// shutdown can be repeated).
     pub async fn shutdown(&mut self) {
+        let _ = self.drain().await;
+        let _ = self.w.flush().await;
         let _ = self.w.shutdown().await;
     }
 }
@@ -298,6 +345,8 @@ fn split<R, W>(r: R, w: W, hs: HandshakeState) -> Result<(SecureSender<W>, Secur
             w,
             transport: t.clone(),
             nonce: 0,
+            out: Vec::new(),
+            done: 0,
         },
         SecureReceiver {
             r,
@@ -580,6 +629,7 @@ where
 mod tests {
     use super::*;
     use hubbridge_proto::{Message, fixtures};
+    use std::time::Duration;
     use tokio::io::{ReadHalf, WriteHalf, duplex, split as io_split};
 
     type Half = (ReadHalf<tokio::io::DuplexStream>, WriteHalf<tokio::io::DuplexStream>);
@@ -707,6 +757,88 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    type Duplex = tokio::io::DuplexStream;
+
+    /// A resumed session over a tiny pipe (`duplex(64)`).
+    async fn tiny_session() -> (
+        ClientSession<ReadHalf<Duplex>, WriteHalf<Duplex>>,
+        ServerSession<ReadHalf<Duplex>, WriteHalf<Duplex>>,
+    ) {
+        let (a, b) = duplex(64);
+        let (host_end, agent_end) = (io_split(a), io_split(b));
+        let key = Secret([9; 32]);
+        let k2 = key.clone();
+        let agent_task = tokio::spawn(agent(agent_end, move |_| ServerDecision::Resume { key: k2 }));
+        let client = client_handshake(host_end.0, host_end.1, "host1", "Mac", ClientAuth::resume_with(key))
+            .await
+            .unwrap();
+        (client, agent_task.await.unwrap().unwrap())
+    }
+
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 + i / 251) as u8).collect()
+    }
+
+    /// Starts a 200 KiB send on a pipe nobody reads and drops it after a timeout.
+    async fn drop_big_send(client: &mut ClientSession<ReadHalf<Duplex>, WriteHalf<Duplex>>) -> Vec<u8> {
+        let big = patterned(200 * 1024);
+        let res = tokio::time::timeout(Duration::from_millis(50), client.sender.send_bytes(&big)).await;
+        assert!(res.is_err(), "the send must still be waiting on the full pipe");
+        big
+    }
+
+    #[tokio::test]
+    async fn send_dropped_mid_write_is_finished_by_next_send() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut client, mut server) = tiny_session().await;
+            let big = drop_big_send(&mut client).await;
+            let reader = tokio::spawn(async move {
+                let first = server.receiver.recv_bytes().await.unwrap();
+                let second = server.receiver.recv_bytes().await.unwrap();
+                (first, second)
+            });
+            client.sender.send_bytes(b"second").await.unwrap();
+            let (first, second) = reader.await.unwrap();
+            assert!(first == big, "first message corrupted");
+            assert_eq!(second, b"second");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[tokio::test]
+    async fn too_large_leaves_sender_usable() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut client, mut server) = tiny_session().await;
+            let res = client.sender.send_bytes(&vec![0u8; MAX_MESSAGE_LEN + 1]).await;
+            assert!(matches!(res, Err(LinkError::TooLarge(_))), "got {res:?}");
+            let reader = tokio::spawn(async move { server.receiver.recv_bytes().await.unwrap() });
+            client.sender.send_bytes(b"after").await.unwrap();
+            assert_eq!(reader.await.unwrap(), b"after");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_leftover() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut client, mut server) = tiny_session().await;
+            let big = drop_big_send(&mut client).await;
+            let reader = tokio::spawn(async move {
+                let first = server.receiver.recv_bytes().await.unwrap();
+                let end = server.receiver.recv_bytes().await;
+                (first, end)
+            });
+            client.sender.shutdown().await;
+            let (first, end) = reader.await.unwrap();
+            assert!(first == big, "leftover message corrupted");
+            assert!(matches!(end, Err(LinkError::Closed)), "got {end:?}");
+        })
+        .await
+        .expect("test timed out");
     }
 
     #[test]

@@ -46,6 +46,17 @@ async fn start_agent() -> (Agent, std::net::SocketAddr, Arc<Calls>) {
     (agent, addr, calls)
 }
 
+/// The agent's session list empties shortly after the host closed (orderly close).
+async fn wait_no_sessions(agent: &Agent) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !agent.status().sessions.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the agent still lists the session 2 s after close()");
+}
+
 #[tokio::test]
 async fn pair_list_ping_events() {
     let (agent, addr, calls) = start_agent().await;
@@ -63,6 +74,7 @@ async fn pair_list_ping_events() {
     let c = Client::pair(&[addr], &mut store, &pin).await.unwrap();
     assert_eq!(c.agent_id, agent.agent_id());
     c.close().await;
+    wait_no_sessions(&agent).await;
     assert!(store.key_for(&agent.agent_id()).is_some());
     assert_eq!(agent.status().paired_hosts.len(), 1);
     assert!(!agent.status().pairing_active, "the PIN is single-use");
@@ -132,4 +144,29 @@ async fn wrong_pins_lock_pairing() {
     let pin = agent.start_pairing();
     Client::pair(&[addr], &mut store, &pin).await.unwrap().close().await;
     assert_eq!(store.data.agents.len(), 1);
+}
+
+#[tokio::test]
+async fn close_after_pipelined_requests() {
+    let (agent, addr, _calls) = start_agent().await;
+    let mut store = Store::load(&temp_dir("host").join("host.json")).unwrap();
+    let pin = agent.start_pairing();
+    Client::pair(&[addr], &mut store, &pin).await.unwrap().close().await;
+    wait_no_sessions(&agent).await;
+
+    let c = Client::connect(&[addr], &mut store).await.unwrap();
+    assert_eq!(agent.status().sessions.len(), 1);
+    let mut pendings = Vec::new();
+    for seq in 0..8 {
+        pendings.push(c.submit(Message::Ping { seq, sent_us: 0 }).await.unwrap());
+    }
+    c.close().await;
+    // The agent ends the session as an orderly close after the pipelined requests.
+    wait_no_sessions(&agent).await;
+
+    // The key store still works: a new session can be resumed.
+    let c = Client::connect(&[addr], &mut store).await.unwrap();
+    c.ping(1).await.unwrap();
+    c.close().await;
+    wait_no_sessions(&agent).await;
 }
