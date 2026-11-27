@@ -3,7 +3,7 @@
 use std::fmt::Write;
 use std::time::Duration;
 
-use hubbridge_proto::usb::class_name;
+use hubbridge_proto::usb::{class_name, clean_str};
 use hubbridge_proto::{AgentInfo, TransferType, UsbDeviceInfo};
 
 fn bcd(v: u16) -> String {
@@ -12,7 +12,11 @@ fn bcd(v: u16) -> String {
 
 pub fn device(d: &UsbDeviceInfo) -> String {
     let mut s = String::new();
-    let maker = d.manufacturer.as_deref().map(|m| format!(" — {m}")).unwrap_or_default();
+    let maker = d
+        .manufacturer
+        .as_deref()
+        .map(|m| format!(" — {}", clean_str(m)))
+        .unwrap_or_default();
     let perm = if d.has_permission { "granted" } else { "not granted" };
     let _ = writeln!(s, "[{}] {}{}  (permission: {perm})", d.id, d.label(), maker);
     let mut facts = vec![d.path.clone(), format!("class {:02x} {}", d.class, class_name(d.class))];
@@ -30,14 +34,22 @@ pub fn device(d: &UsbDeviceInfo) -> String {
     }
     let _ = writeln!(s, "    {}", facts.join(" · "));
     for c in &d.configurations {
-        let name = c.name.as_deref().map(|n| format!(" \"{n}\"")).unwrap_or_default();
+        let name = c
+            .name
+            .as_deref()
+            .map(|n| format!(" \"{}\"", clean_str(n)))
+            .unwrap_or_default();
         let _ = writeln!(
             s,
             "    config {}{}: {} mA, attributes 0x{:02x}",
             c.value, name, c.max_power_ma, c.attributes
         );
         for i in &c.interfaces {
-            let name = i.name.as_deref().map(|n| format!(" \"{n}\"")).unwrap_or_default();
+            let name = i
+                .name
+                .as_deref()
+                .map(|n| format!(" \"{}\"", clean_str(n)))
+                .unwrap_or_default();
             let _ = writeln!(
                 s,
                 "      interface {}.{} {} {:02x}/{:02x}/{:02x}{}",
@@ -75,7 +87,7 @@ pub fn device(d: &UsbDeviceInfo) -> String {
 pub fn agent_info(i: &AgentInfo) -> String {
     format!(
         "{} ({})\n  id       {}\n  os       {}\n  app      {}\n  protocol v{}\n  USB host {}",
-        i.name,
+        clean_str(&i.name),
         i.model,
         i.agent_id,
         i.os,

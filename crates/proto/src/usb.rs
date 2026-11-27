@@ -132,9 +132,14 @@ impl UsbDeviceInfo {
 
     /// Short "vvvv:pppp Product" label for lists.
     pub fn label(&self) -> String {
-        let name = self.product.as_deref().unwrap_or("(unnamed)");
+        let name = self.product.as_deref().map(clean_str).unwrap_or("(unnamed)");
         format!("{:04x}:{:04x} {}", self.vendor_id, self.product_id, name)
     }
+}
+
+/// Strip what USB string descriptors are often padded with: spaces, NULs, control chars.
+pub fn clean_str(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c.is_control())
 }
 
 /// Human-readable name of a USB class code (device or interface).

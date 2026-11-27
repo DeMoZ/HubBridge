@@ -44,8 +44,20 @@ struct AndroidDevice {
     raw_descriptors_hex: Option<String>,
 }
 
+/// USB string descriptors often carry padding spaces; empty means absent.
+fn clean(s: Option<String>) -> Option<String> {
+    s.map(|v| hubbridge_proto::usb::clean_str(&v).to_string())
+        .filter(|v| !v.is_empty())
+}
+
 impl From<AndroidDevice> for UsbDeviceInfo {
-    fn from(a: AndroidDevice) -> Self {
+    fn from(mut a: AndroidDevice) -> Self {
+        for c in &mut a.configurations {
+            c.name = clean(c.name.take());
+            for i in &mut c.interfaces {
+                i.name = clean(i.name.take());
+            }
+        }
         let mut d = UsbDeviceInfo {
             id: a.id,
             path: a.path,
@@ -56,9 +68,9 @@ impl From<AndroidDevice> for UsbDeviceInfo {
             protocol: a.protocol,
             bcd_usb: None,
             bcd_device: None,
-            manufacturer: a.manufacturer,
-            product: a.product,
-            serial: a.serial,
+            manufacturer: clean(a.manufacturer),
+            product: clean(a.product),
+            serial: clean(a.serial),
             configurations: a.configurations,
             has_permission: a.has_permission,
             raw_descriptors: a.raw_descriptors_hex.and_then(|h| hex::decode(h).ok()),
@@ -302,7 +314,7 @@ mod tests {
         let raw = hex::encode(hubbridge_proto::fixtures::cp2102_raw());
         let json = format!(
             r#"[{{"id":1002,"path":"/dev/bus/usb/001/003","vendor_id":4292,"product_id":60000,
-            "class":0,"subclass":0,"protocol":0,"manufacturer":"Silicon Labs","product":"CP2102",
+            "class":0,"subclass":0,"protocol":0,"manufacturer":"Silicon Labs \u0000 ","product":"CP2102",
             "serial":null,"has_permission":true,
             "configurations":[{{"value":1,"name":null,"attributes":128,"max_power_ma":100,
               "interfaces":[{{"number":0,"alternate":0,"class":255,"subclass":0,"protocol":0,"name":"UART",
@@ -321,5 +333,6 @@ mod tests {
         assert_eq!(intf.endpoints.len(), 2);
         assert_eq!(intf.name.as_deref(), Some("UART"));
         assert!(list[1].configurations.is_empty());
+        assert_eq!(uart.manufacturer.as_deref(), Some("Silicon Labs"));
     }
 }
