@@ -104,13 +104,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use std::collections::BTreeMap;
 
-    const PAGE: &str = include_str!("ui/index.html");
+    /// The page with `\r\n` folded to `\n`, so the tests match on one line ending (a Windows checkout has CRLF).
+    fn page() -> &'static str {
+        static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PAGE.get_or_init(|| include_str!("ui/index.html").replace("\r\n", "\n"))
+    }
+
+    #[test]
+    fn page_helper_folds_crlf() {
+        assert!(!page().contains('\r'));
+    }
 
     /// The `<script>` part of the page.
     fn script() -> &'static str {
-        let start = PAGE.find("<script>").expect("page has a script") + "<script>".len();
-        let end = PAGE.rfind("</script>").expect("script is closed");
-        &PAGE[start..end]
+        let start = page().find("<script>").expect("page has a script") + "<script>".len();
+        let end = page().rfind("</script>").expect("script is closed");
+        &page()[start..end]
     }
 
     /// True when a script line declares, binds or assigns the global name `ipc`.
@@ -268,7 +277,7 @@ mod tests {
 
     #[test]
     fn page_loads_nothing_remote() {
-        if let Some(found) = remote_violation(PAGE) {
+        if let Some(found) = remote_violation(page()) {
             panic!("the page must not load anything remote: {found}");
         }
     }
@@ -303,9 +312,9 @@ mod tests {
 
     #[test]
     fn only_the_live_region_is_a_status_in_the_top_bar() {
-        let start = PAGE.find("<header class=\"top\"").expect("top bar");
-        let end = start + PAGE[start..].find("</header>").expect("top bar closes");
-        let header = &PAGE[start..end];
+        let start = page().find("<header class=\"top\"").expect("top bar");
+        let end = start + page()[start..].find("</header>").expect("top bar closes");
+        let header = &page()[start..end];
         assert_eq!(
             header.matches("role=\"status\"").count(),
             1,
@@ -380,18 +389,18 @@ mod tests {
     /// from byte offset `from`.
     fn block_at(from: usize, marker: &str) -> &'static str {
         let at = from
-            + PAGE[from..]
+            + page()[from..]
                 .find(marker)
                 .unwrap_or_else(|| panic!("page has no `{marker}` block"));
-        let open = at + PAGE[at..].find('{').expect("block opens");
+        let open = at + page()[at..].find('{').expect("block opens");
         let mut depth = 0;
-        for (i, ch) in PAGE[open..].char_indices() {
+        for (i, ch) in page()[open..].char_indices() {
             match ch {
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        return &PAGE[open + 1..open + i];
+                        return &page()[open + 1..open + i];
                     }
                 }
                 _ => {}
@@ -435,7 +444,7 @@ mod tests {
             "the two copies of the light tokens must be identical"
         );
 
-        let om = PAGE.find(OPAQUE_MEDIA).expect("opaque override media query");
+        let om = page().find(OPAQUE_MEDIA).expect("opaque override media query");
         let dark_opaque = decls(block_at(om, ":root, :root[data-theme=\"dark\"]"));
         let lo_forced = decls(block_at(om, ":root[data-theme=\"light\"]"));
         let lo_media = decls(block_at(om, ":root:not([data-theme=\"dark\"])"));
@@ -659,8 +668,8 @@ mod tests {
     /// token-level contrast test also covers how the colors are used.
     #[test]
     fn text_colors_are_plain_tokens() {
-        let start = PAGE.find("<style>").expect("style") + 7;
-        let css = &PAGE[start..PAGE.find("</style>").expect("style closes")];
+        let start = page().find("<style>").expect("style") + 7;
+        let css = &page()[start..page().find("</style>").expect("style closes")];
         let allowed = [
             "var(--text-1)",
             "var(--text-2)",
@@ -740,7 +749,7 @@ mod tests {
         }
         assert!(!hosts.is_empty(), "no put() hosts found");
         for id in hosts {
-            let at = PAGE
+            let at = page()
                 .find(&format!("id=\"{id}\""))
                 .unwrap_or_else(|| panic!("put host #{id} missing in the markup"));
             if ["stMark", "stText", "stLive"].contains(&id) {
@@ -749,7 +758,7 @@ mod tests {
             let mut open: Vec<usize> = Vec::new();
             let mut i = 0;
             while i < at {
-                let rest = &PAGE[i..at];
+                let rest = &page()[i..at];
                 let (o, c) = (rest.find("<section"), rest.find("</section>"));
                 match (o, c) {
                     (Some(o), c) if c.is_none_or(|c| o < c) => {
@@ -763,7 +772,7 @@ mod tests {
                     _ => break,
                 }
             }
-            let tag_of = |p: usize| &PAGE[p..p + PAGE[p..].find('>').unwrap()];
+            let tag_of = |p: usize| &page()[p..p + page()[p..].find('>').unwrap()];
             let panel = *open
                 .iter()
                 .rev()
@@ -771,8 +780,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("put host #{id} is not inside a panel section"));
             let mut depth = 0;
             let mut end = panel;
-            for (j, _) in PAGE[panel..].match_indices('<') {
-                let t = &PAGE[panel + j..];
+            for (j, _) in page()[panel..].match_indices('<') {
+                let t = &page()[panel + j..];
                 if t.starts_with("<section") {
                     depth += 1;
                 } else if t.starts_with("</section>") {
@@ -784,7 +793,7 @@ mod tests {
                 }
             }
             assert!(end > at, "panel of #{id} does not enclose it");
-            let body = &PAGE[panel..end];
+            let body = &page()[panel..end];
             let focusable = |tag: &str| tag.contains("tabindex=\"-1\"");
             match body.find("<h2") {
                 Some(h) => assert!(
