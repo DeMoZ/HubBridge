@@ -20,6 +20,14 @@ adapter with its endpoints over Wi-Fi and over `adb forward`; unplugging it show
 
 ## Step 2 — USB data forwarding
 
+Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
+- [x] Protocol: open/close, claim/release (kernel driver detach), alternate settings,
+      control, bulk/interrupt transfers with many in flight in order, clear halt, reset.
+- [x] Agent: nusb on the Android usbfs fd, one worker per endpoint, timeouts; device
+      ownership per session; fake backend (loopback, Bulk-Only flash drive).
+- [x] Host: client API, mass-storage client (INQUIRY / capacity / READ(10) with pipelined
+      data phase), `hubbridge usb descriptors|storage [--bench]`.
+
 1. `crates/usbio` (Android): open device by fd (`UsbDeviceConnection.getFileDescriptor()`
    passed through JNI), claim/release interfaces (detach kernel driver), control transfers,
    async URB queue for bulk/interrupt with configurable depth, cancellation, reset.
