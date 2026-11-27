@@ -1,0 +1,26 @@
+[package]
+name = "hubbridge-link"
+description = "HubBridge secure link: PIN pairing (SPAKE2) and encrypted sessions (Noise NNpsk0) over any byte stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hubbridge-proto = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+snow = { workspace = true }
+spake2 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

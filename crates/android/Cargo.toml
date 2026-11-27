@@ -1,0 +1,29 @@
+[package]
+name = "hubbridge-android"
+description = "JNI bindings that run the HubBridge agent core inside the Android app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "hubbridge_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hubbridge-proto = { workspace = true }
+hubbridge-agent = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+hex = { workspace = true }
+jni = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { workspace = true }
