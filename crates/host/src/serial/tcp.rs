@@ -7,6 +7,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -110,6 +111,31 @@ impl Drop for TcpFront {
     }
 }
 
+/// Accept errors that pass: the listener goes on after a short wait.
+pub fn accept_error_is_transient(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    if matches!(
+        e.kind(),
+        ConnectionAborted | ConnectionReset | Interrupted | WouldBlock | TimedOut
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if let Some(code) = e.raw_os_error() {
+        // EMFILE / ENFILE (descriptors), ENOBUFS / ENOMEM (memory), ECONNABORTED, EPROTO.
+        return matches!(
+            code,
+            libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::ECONNABORTED | libc::EPROTO
+        );
+    }
+    #[cfg(windows)]
+    if let Some(code) = e.raw_os_error() {
+        // WSAEMFILE, WSAENOBUFS.
+        return matches!(code, 10024 | 10055);
+    }
+    false
+}
+
 async fn accept_loop(listener: TcpListener, port: SerialPort, opts: TcpOptions) {
     let active = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(Notify::new());
@@ -122,7 +148,20 @@ async fn accept_loop(listener: TcpListener, port: SerialPort, opts: TcpOptions) 
         let idle = !active.load(Ordering::SeqCst);
         tokio::select! {
             acc = listener.accept() => {
-                let Ok((stream, peer)) = acc else { return };
+                let (stream, peer) = match acc {
+                    Ok(c) => c,
+                    Err(e) if accept_error_is_transient(&e) => {
+                        // Out of descriptors, a client that left before we got to it, a signal:
+                        // not the end of the listener.
+                        warn!("accept failed, trying again: {e}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("accept failed, the TCP front end ends: {e}");
+                        return;
+                    }
+                };
                 stream.set_nodelay(true).ok();
                 if active.swap(true, Ordering::SeqCst) {
                     debug!(%peer, "second client refused");
@@ -487,6 +526,27 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_accept_errors_are_told_from_fatal_ones() {
+        use std::io::{Error, ErrorKind};
+        for k in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+            ErrorKind::WouldBlock,
+        ] {
+            assert!(accept_error_is_transient(&Error::from(k)), "{k:?}");
+        }
+        #[cfg(unix)]
+        for code in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ECONNABORTED] {
+            assert!(accept_error_is_transient(&Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(!accept_error_is_transient(&Error::from(ErrorKind::PermissionDenied)));
+        assert!(!accept_error_is_transient(&Error::from(ErrorKind::InvalidInput)));
+        #[cfg(unix)]
+        assert!(!accept_error_is_transient(&Error::from_raw_os_error(libc::EBADF)));
+    }
 
     #[test]
     fn bare_port_means_loopback() {

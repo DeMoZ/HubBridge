@@ -35,8 +35,13 @@ pub const TX_LIMIT: usize = 64 * 1024;
 pub const OUT_TRANSFER: usize = 16 * 1024;
 /// OUT transfers in flight.
 pub const OUT_IN_FLIGHT: usize = 4;
-/// Longest `close` takes, whatever the phone does.
-pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The chip's share of `close`; releasing and closing get their own timeouts after it.
+pub const CHIP_SHUTDOWN_BUDGET: Duration = Duration::from_secs(1);
+/// Each control request of the chip shutdown, and each release / close request.
+pub const SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
+pub const RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Most a second caller of `close` waits for the first.
+const CLOSE_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub struct PortOptions {
@@ -318,11 +323,20 @@ impl Inner {
 
     /// Send one control request; transport failures are returned, the status is not judged.
     async fn raw_reply(&self, what: &str, c: Ctl) -> Result<UsbReply> {
-        match self
-            .client
-            .control(self.id, c.setup, c.data, self.opts.control_timeout)
-            .await
-        {
+        let request = self.client.control(self.id, c.setup, c.data, self.opts.control_timeout);
+        // While closing, a request that is not answered quickly is given up on (not a
+        // transport failure: the phone may be fine and the chip wedged).
+        let result = if self.closed.load(Ordering::SeqCst) {
+            match tokio::time::timeout(SHUTDOWN_REQUEST_TIMEOUT, request).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return Err(anyhow!("no answer while closing")).context(format!("{} {what}", self.name()));
+                }
+            }
+        } else {
+            request.await
+        };
+        match result {
             Ok(r) => Ok(r),
             Err(e) => {
                 self.note_error(&e);
@@ -805,7 +819,7 @@ impl SerialPort {
         if i.closed.swap(true, Ordering::SeqCst) {
             // Someone else is closing: wait until the device is given back.
             let mut rx = i.closed_tx.subscribe();
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT * 2, rx.wait_for(|v| *v)).await;
+            let _ = tokio::time::timeout(CLOSE_WAIT, rx.wait_for(|v| *v)).await;
             return;
         }
         i.stop_with("port closed".into());
@@ -813,27 +827,30 @@ impl SerialPort {
         for t in tasks {
             t.abort();
         }
-        // The whole shutdown has CLOSE_TIMEOUT: on a half-open session every request would
-        // otherwise wait its own timeout.
-        let shutdown = async {
-            if !i.device_lost.load(Ordering::Relaxed) {
+        // Three separate budgets: a chip request that never answers must not keep the
+        // interfaces from being released and the device from being closed, or the agent keeps
+        // it open for this session and another one gets Busy.
+        if !i.device_lost.load(Ordering::Relaxed) {
+            let chip = async {
                 let _g = i.ctl_lock.lock().await;
                 let _ = shutdown_chip(i).await;
-                for n in i.det.claim.iter().rev() {
-                    if i.device_lost.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let _ = i.client.release_interface(i.id, *n).await;
+            };
+            if tokio::time::timeout(CHIP_SHUTDOWN_BUDGET, chip).await.is_err() {
+                tracing::warn!("the serial chip did not answer while closing");
+            }
+        }
+        // Only a fatal transport error (the device or the session is gone) skips the rest;
+        // running out of the chip's budget does not.
+        if !i.device_lost.load(Ordering::Relaxed) {
+            for n in i.det.claim.iter().rev() {
+                if i.device_lost.load(Ordering::Relaxed) {
+                    break;
                 }
+                let _ = tokio::time::timeout(RELEASE_TIMEOUT, i.client.release_interface(i.id, *n)).await;
             }
-            // A fatal error means the session or the device is gone: nothing to close.
-            if !i.device_lost.load(Ordering::Relaxed) {
-                let _ = i.client.close_device(i.id).await;
-            }
-        };
-        if tokio::time::timeout(CLOSE_TIMEOUT, shutdown).await.is_err() {
-            i.device_lost.store(true, Ordering::Relaxed);
-            tracing::warn!("closing the serial port timed out: the phone does not answer");
+        }
+        if !i.device_lost.load(Ordering::Relaxed) {
+            let _ = tokio::time::timeout(RELEASE_TIMEOUT, i.client.close_device(i.id)).await;
         }
         i.closed_tx.send_replace(true);
     }
@@ -900,17 +917,20 @@ async fn configure(i: &Inner, cfg: &SerialConfig) -> Result<()> {
             c.rts = cfg.rts;
         }
         DriverKind::Ch34x => {
+            // Like usb_control_msg_recv in ch341.c, a short read is an error.
             let version = i.raw("READ_VERSION", ch34x::read_version()).await?;
-            let version = *version.first().ok_or_else(|| anyhow!("CH34x gave no chip version"))?;
+            if version.len() < 2 {
+                bail!("CH34x READ_VERSION: short answer ({} byte)", version.len());
+            }
+            let version = version[0];
             // The chip variants without break support (and with a limited prescaler) stall
             // the read of the break register.
             let limited = match i.raw_reply("quirk probe", ch34x::quirk_probe()).await? {
-                r if r.status == UsbStatus::Ok => false,
+                // Failing the open on any other status is what ch341_detect_quirks does.
+                r if r.status == UsbStatus::Ok && r.data.len() >= 2 => false,
+                r if r.status == UsbStatus::Ok => bail!("CH34x quirk probe: short answer ({} byte)", r.data.len()),
                 r if r.status == UsbStatus::Stall => true,
-                r => {
-                    tracing::warn!("CH34x quirk probe answered {:?}", r.status);
-                    bail!("CH34x quirk probe failed: {:?}", r.status);
-                }
+                r => bail!("CH34x quirk probe failed: {:?}", r.status),
             };
             let line = ch34x::effective_line(cfg.line);
             let baud = ch34x::set_baud(version, line.baud, limited).map_err(|e| anyhow!(e))?;

@@ -157,9 +157,11 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 - Bytes the device sends while no program has the PTY open stay in the bridge's receive
   buffer (up to 1 MiB, then they are dropped and counted as "dropped") and are read by the
   next program that opens the PTY.
-- **Linux**: the kernel forces 8 data bits and no parity on a PTY (`pty_set_termios`), so only
-  the speed, stop bits and RTS/CTS a program sets reach the chip; for 7E1 and the like use
-  `--data-bits` / `--parity` (with `--lock-line`) or RFC 2217. On macOS all of them work.
+- **Linux**: the kernel forces 8 data bits and no parity on a PTY (`pty_set_termios`), so a
+  program cannot change them there. The bridge takes only the speed, stop bits and RTS/CTS
+  from the PTY and keeps the data bits and parity the port was opened with (`--data-bits`,
+  `--parity`); a program changing the speed on a 7E1 port leaves it 7E1. On macOS all
+  settings work.
 - **Timing of a speed change**: the PTY's termios is polled (every 100 ms and before each
   chunk the program writes), so a program that writes data and then changes the rate
   with `tcsetattr(TCSADRAIN)` can see the new rate applied to bytes it wrote before the change

@@ -127,6 +127,12 @@ pub struct SerialState {
     ftdi_legacy_channel: bool,
     /// The next bulk OUT ends with this status without reaching the chip (test hook).
     fail_next_out: Option<UsbStatus>,
+    /// Control requests with this request code end with this status (test hook).
+    fail_request: Option<(u8, UsbStatus)>,
+    /// Control reads answer with one byte only (test hook).
+    short_reads: bool,
+    /// Control requests to the chip are never answered while set (test hook).
+    hang_control: bool,
     /// Every bulk IN stalls while set (test hook).
     stall_in_forever: bool,
     /// The next bulk IN ends `Cancelled` carrying these bytes (test hook).
@@ -226,6 +232,9 @@ impl SerialState {
             modem: ModemLines::default(),
             ftdi_legacy_channel: parsed.device.bcd_device <= 0x0600 && parsed.device.bcd_device != 0x0500,
             fail_next_out: None,
+            fail_request: None,
+            short_reads: false,
+            hang_control: false,
             stall_in_forever: false,
             cancel_next_in: None,
         }
@@ -266,6 +275,22 @@ impl SerialState {
 
     pub fn fail_next_out(&mut self, status: UsbStatus) {
         self.fail_next_out = Some(status);
+    }
+
+    pub fn set_fail_request(&mut self, f: Option<(u8, UsbStatus)>) {
+        self.fail_request = f;
+    }
+
+    pub fn set_short_reads(&mut self, on: bool) {
+        self.short_reads = on;
+    }
+
+    pub fn set_hang_control(&mut self, on: bool) {
+        self.hang_control = on;
+    }
+
+    pub fn hangs_control(&self) -> bool {
+        self.hang_control
     }
 
     pub fn set_stall_in(&mut self, on: bool) {
@@ -436,6 +461,24 @@ impl SerialState {
             setup,
             data: data.to_vec(),
         });
+        if let Some((request, status)) = self.fail_request
+            && setup.request == request
+            && setup.request_type & 0x60 != 0
+        {
+            return Some(TransferResult::failed(status));
+        }
+        let mut r = self.control_inner(setup, data);
+        if self.short_reads
+            && let Some(res) = &mut r
+            && res.data.len() > 1
+        {
+            res.data.truncate(1);
+            res.actual = 1;
+        }
+        r
+    }
+
+    fn control_inner(&mut self, setup: Setup, data: &[u8]) -> Option<TransferResult> {
         // Standard requests a host may send during setup.
         if matches!((setup.request_type, setup.request), (0x00, 0x09) | (0x01, 0x0b)) {
             return Some(TransferResult::ok_out(0));

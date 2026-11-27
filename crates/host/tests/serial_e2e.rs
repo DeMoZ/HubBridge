@@ -17,6 +17,7 @@ const FT232H: u32 = 4;
 const CH340: u32 = 5;
 const CDC: u32 = 6;
 const CP2102N: u32 = 7;
+const CH340_LIMITED: u32 = 9;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("hubbridge-serial-{tag}-{}", hubbridge_link::random_id()));
@@ -32,6 +33,8 @@ struct Env {
     /// Set to stop the proxy between host and agent from passing anything on (a half-open
     /// session); only with [`env_proxied`].
     freeze: Arc<std::sync::atomic::AtomicBool>,
+    /// Where the agent listens (to start another session).
+    addr: std::net::SocketAddr,
 }
 
 async fn env() -> Env {
@@ -101,6 +104,7 @@ async fn env_with(proxied: bool) -> Env {
         fixtures::cdc_acm_simple(CDC),
         fixtures::cp2102_uart(CP2102N),
         fixtures::flash_drive(8),
+        fixtures::ch340_uart(CH340_LIMITED),
     ];
     agent.set_devices(infos.clone());
     let usb = FakeUsb::new();
@@ -120,6 +124,14 @@ async fn env_with(proxied: bool) -> Env {
     );
     add(CDC, fixtures::cdc_acm_simple_raw(), SerialChip::CdcAcm);
     add(CP2102N, fixtures::cp2102_raw(), SerialChip::Cp210x { partnum: 0x20 });
+    add(
+        CH340_LIMITED,
+        fixtures::ch340_raw(),
+        SerialChip::Ch34x {
+            version: 0x31,
+            limited_prescaler: true,
+        },
+    );
     usb.add(
         8,
         fixtures::flash_drive_raw(),
@@ -148,6 +160,7 @@ async fn env_with(proxied: bool) -> Env {
         client,
         infos,
         freeze,
+        addr,
     }
 }
 
@@ -181,6 +194,18 @@ fn requests(usb: &FakeUsb, id: u32) -> Vec<(u8, u8, u16, u16)> {
 
 fn pattern(n: usize) -> Vec<u8> {
     (0..n).map(|i| (i * 7 + i / 251) as u8).collect()
+}
+
+/// Wait until `p` has counted `n` bytes as sent: the counter moves when the OUT transfer
+/// completes (a spawned task), which can be after the echo came back.
+async fn wait_tx(p: &SerialPort, n: u64) {
+    for _ in 0..500 {
+        if p.stats().tx >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("tx counter stayed at {} (wanted {n})", p.stats().tx);
 }
 
 async fn read_exact(p: &SerialPort, n: usize) -> Vec<u8> {
@@ -928,6 +953,32 @@ mod pty {
         p.close().await;
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_speed_change_keeps_the_ports_data_bits_and_parity() {
+        let e = env().await;
+        let cfg = SerialConfig {
+            line: Line {
+                baud: 115_200,
+                data_bits: 7,
+                parity: Parity::Even,
+                stop_bits: StopBits::One,
+            },
+            ..SerialConfig::default()
+        };
+        let p = e.open_with(CP2102, cfg, PortOptions::default()).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
+        let app = open_slave(pty.path());
+        let mut t = tcgetattr(&app).unwrap();
+        t.set_speed(57_600).unwrap();
+        tcsetattr(&app, OptionalActions::Now, &t).unwrap();
+        wait_for(|| e.usb.serial_state(CP2102).baud == 57_600).await;
+        let d = e.usb.serial_state(CP2102);
+        assert_eq!((d.data_bits, d.parity), (7, 2), "7E1 stays");
+        pty.stop();
+        p.close().await;
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn nonstandard_rate_reaches_the_chip() {
@@ -1528,7 +1579,7 @@ mod net {
             assert_eq!(got, b"tcp sidepty side");
             assert_eq!(c.data(8).await, b"pty side");
         }
-        assert!(b.stats().tx >= 8);
+        wait_tx(b.port(), 8).await;
         b.stop().await;
         assert_eq!(b.done().await, "port closed");
         // The device is closed on the agent: another command can open it.
@@ -1746,6 +1797,83 @@ mod review {
     }
 
     #[tokio::test]
+    async fn close_gives_the_device_back_even_when_the_chip_hangs() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        // The chip stops answering; the phone and the session are fine.
+        e.usb.set_hang_control(CP2102, true);
+        let start = std::time::Instant::now();
+        p.close().await;
+        assert!(start.elapsed() < Duration::from_secs(4), "{:?}", start.elapsed());
+        e.usb.set_hang_control(CP2102, false);
+        // The device was released and closed on the agent: another session can open it.
+        let mut store2 = Store::load(&temp_dir("host2").join("host.json")).unwrap();
+        let pin = e.agent.start_pairing();
+        let c2 = Client::pair(&[e.addr], &mut store2, &pin).await.unwrap();
+        c2.open_device(CP2102).await.expect("the device is free, not Busy");
+        c2.close_device(CP2102).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn limited_ch34x_uses_the_lower_base_clock() {
+        let e = env().await;
+        let cfg = SerialConfig {
+            line: Line {
+                baud: 12_000,
+                ..Line::default()
+            },
+            ..SerialConfig::default()
+        };
+        let p = e.open_with(CH340_LIMITED, cfg, PortOptions::default()).await;
+        // The quirk probe (register 0x05) stalled: the divisor is the LIMITED_PRESCALER one.
+        let reqs = requests(&e.usb, CH340_LIMITED);
+        assert!(reqs.contains(&(0xc0, 0x95, 0x0005, 0)));
+        assert!(reqs.contains(&(0x40, 0x9a, 0x1312, 0xc182)), "{reqs:?}");
+        // No break on such a chip.
+        assert!(p.set_break(true).await.is_err());
+        p.close().await;
+        // The same rate on a chip without the quirk.
+        let p = e.open_with(CH340, cfg, PortOptions::default()).await;
+        assert!(requests(&e.usb, CH340).contains(&(0x40, 0x9a, 0x1312, 0x8386)));
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn ch34x_open_fails_on_an_unexpected_probe_status_or_a_short_read() {
+        let e = env().await;
+        // Any status but OK or STALL from the quirk probe fails the open, as in Linux.
+        e.usb.fail_control_request(CH340, Some((0x95, UsbStatus::Fault)));
+        let err = SerialPort::open(
+            Arc::clone(&e.client),
+            e.info(CH340),
+            SerialConfig::default(),
+            PortOptions::default(),
+        )
+        .await
+        .err()
+        .expect("open fails");
+        assert!(format!("{err:#}").contains("quirk probe"), "{err:#}");
+        e.usb.fail_control_request(CH340, None);
+        // A one-byte version is a short read.
+        e.usb.set_short_reads(CH340, true);
+        let err = SerialPort::open(
+            Arc::clone(&e.client),
+            e.info(CH340),
+            SerialConfig::default(),
+            PortOptions::default(),
+        )
+        .await
+        .err()
+        .expect("open fails");
+        assert!(format!("{err:#}").contains("short answer"), "{err:#}");
+        e.usb.set_short_reads(CH340, false);
+        // Both failures gave the device back.
+        e.client.open_device(CH340).await.unwrap();
+        e.client.close_device(CH340).await.unwrap();
+        e.open(CH340).await.close().await;
+    }
+
+    #[tokio::test]
     async fn failed_out_transfer_is_counted_and_reported() {
         let e = env().await;
         let p = e.open(CP2102).await;
@@ -1768,6 +1896,7 @@ mod review {
         // One failure does not end the port; the next write works.
         p.write(b"fine").await.unwrap();
         assert_eq!(read_exact(&p, 4).await, b"fine");
+        wait_tx(&p, 4).await;
         assert_eq!(p.stats().tx, 4);
         assert!(p.is_done().is_none());
         p.close().await;

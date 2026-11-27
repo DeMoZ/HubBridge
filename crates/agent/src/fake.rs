@@ -139,6 +139,21 @@ impl FakeUsb {
         self.serial_of(id).lock().unwrap().fail_next_out(status);
     }
 
+    /// Control requests with `request` code end with `status` (`None` clears it).
+    pub fn fail_control_request(&self, id: u32, f: Option<(u8, UsbStatus)>) {
+        self.serial_of(id).lock().unwrap().set_fail_request(f);
+    }
+
+    /// While set, the serial fake answers control reads with a single byte.
+    pub fn set_short_reads(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_short_reads(on);
+    }
+
+    /// While set, the serial fake never answers control requests (a wedged chip).
+    pub fn set_hang_control(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_hang_control(on);
+    }
+
     /// While set, every bulk IN of the serial fake stalls.
     pub fn set_stall_in(&self, id: u32, on: bool) {
         self.serial_of(id).lock().unwrap().set_stall_in(on);
@@ -475,8 +490,18 @@ impl UsbDevice for FakeDevice {
         })
     }
 
-    fn control(&self, setup: Setup, data: Vec<u8>, _timeout: Duration) -> BoxFut<TransferResult> {
-        let res = self.state.lock().unwrap().control(setup, &data);
+    fn control(&self, setup: Setup, data: Vec<u8>, timeout: Duration) -> BoxFut<TransferResult> {
+        let mut st = self.state.lock().unwrap();
+        // A wedged chip: standard requests still work, the chip's do not come back.
+        let hang =
+            st.serial.as_ref().is_some_and(|s| s.lock().unwrap().hangs_control()) && setup.request_type & 0x60 != 0;
+        if hang {
+            return Box::pin(async move {
+                tokio::time::sleep(timeout).await;
+                TransferResult::failed(UsbStatus::Cancelled)
+            });
+        }
+        let res = st.control(setup, &data);
         ready(res)
     }
 

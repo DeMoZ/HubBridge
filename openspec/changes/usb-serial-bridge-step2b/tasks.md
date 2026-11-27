@@ -102,7 +102,7 @@ corrected in the same commit.
 - [x] 11.8 Minor 6: the page keeps updating counters while a field has focus; verify with the window (scripted focus) or a page-level check (Verified with the real window: a baud field focused on one card, counters of the running bridge kept growing, 6 300 then 15 600 bytes.)
 - [x] 11.9 Minor 7: PTY `configure` sets/clears CRTSCTS from the observed flow and CMSPAR for mark/space on Linux; verify a unit test of `configure`/`observe` round trip
 - [x] 11.10 Minor 8: `flow_block` clears AUTO_RECEIVE/AUTO_TRANSMIT; verify unit test (CP2102N E104 erratum noted only)
-- [x] 11.11 Minor 9: CH34x quirk detection reads register 0x0005 as `ch341_detect_quirks`; break read-modify-write keeps 0x1805; an unexpected status during detection is logged, not treated as "no quirk" silently; verify unit and e2e tests, fake updated
+- [x] 11.11 Minor 9: CH34x quirk detection reads register 0x0005 as `ch341_detect_quirks`; break read-modify-write keeps 0x1805; an unexpected status during detection is logged, not treated as "no quirk" silently; verify unit and e2e tests, fake updated **Correction (round 2):** an unexpected status during the probe keeps failing the open, as `ch341_detect_quirks` / `ch341_port_probe` do; the round-1 wording "not fail open" was wrong.
 - [x] 11.12 Minor 10: a permanently stalling IN endpoint stops the port with a reason after N stalls in a row; verify a unit test of `classify_in` and an e2e test with a fake that stalls forever
 - [x] 11.13 Minor 11: RFC 2217 subnegotiation buffer capped at 256 bytes; verify a parser unit test
 - [x] 11.14 Minor 12: LIMITATIONS documents that a PTY line change can apply to bytes written before `tcsetattr(TCSADRAIN)`; verify by reading the doc
@@ -112,6 +112,15 @@ corrected in the same commit.
 - [x] 11.18 Gates after the round: fmt, clippy, tests (serial_e2e three times), Android clippy
 
 Skipped nits: CP2105 SCI limits (second port of a CP2105 is limited to 921600), cost of `refresh_serial_capable` on every model update (a few descriptor walks).
+
+## 12. Review round 2
+
+- [x] 12.1 Flaky counters in tests: `failed_out_transfer_is_counted_and_reported` waits for `stats().tx` instead of asserting right after the echo; the other tests are audited for the same pattern; verify `serial_e2e` passes 20 runs in a row
+- [x] 12.2 `close()` gives the chip shutdown its own budget (1 s, short per-request timeout) and always sends release and `close_device` with their own short timeout unless a fatal transport error was seen; verify an e2e test with a fake chip that never answers a shutdown request: after `close()` another client can open the device
+- [x] 12.3 PTY `sync_line` on Linux and Android takes only speed, stop bits and flow from the termios and keeps data bits and parity from the port (the kernel forces CS8 and no parity); verify a Linux-only test (7E1, speed change keeps 7E1), a pure unit test of the merge that runs everywhere, and the LIMITATIONS wording
+- [x] 12.4 RFC 2217 negotiation flags mean "request pending" and are cleared when the peer answers or refuses, so renegotiation after WONT/DONT works without loops; verify unit tests for renegotiation; `com_port_enabled()` is used or removed
+- [x] 12.5 TCP accept loop survives transient accept errors (log, wait 100 ms, go on); verify a unit test of the error classification
+- [x] 12.6 CH34x: unexpected quirk-probe status fails the open (as Linux does), no duplicate warning, a short read is an error; verify host e2e tests for a limited chip (divisor encoding) and for the unexpected-status path; correction note on 11.11
 
 ## Workflow follow-up
 

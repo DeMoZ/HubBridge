@@ -105,6 +105,28 @@ pub fn observe(t: &Termios) -> Observed {
     }
 }
 
+/// What a program asked for, as far as the kernel lets a PTY carry it. Linux forces 8 data
+/// bits and no parity on a PTY (`pty_set_termios` clears CSIZE/PARENB), so there the data
+/// bits and parity stay what the port has; speed, stop bits and flow control come from the
+/// termios.
+pub fn merge_observed(now: Observed, port_line: Line, kernel_forces_8n: bool) -> Observed {
+    if !kernel_forces_8n {
+        return now;
+    }
+    Observed {
+        line: Line {
+            data_bits: port_line.data_bits,
+            parity: port_line.parity,
+            ..now.line
+        },
+        flow: now.flow,
+    }
+}
+
+fn kernel_forces_8n() -> bool {
+    cfg!(any(target_os = "linux", target_os = "android"))
+}
+
 /// Raw mode with the UART settings of `obs`.
 pub(crate) fn configure(t: &mut Termios, obs: &Observed) -> Result<()> {
     t.make_raw();
@@ -178,7 +200,7 @@ impl PtyFront {
         let (end_tx, ended) = tokio::sync::watch::channel(false);
         let end_tx = Arc::new(end_tx);
         let (g1, g2) = (EndGuard(Arc::clone(&end_tx)), EndGuard(end_tx));
-        let observed = observe(&tcgetattr(&*slave)?);
+        let observed = merge_observed(observe(&tcgetattr(&*slave)?), port.line(), kernel_forces_8n());
         let reader = {
             let (afd, slave, port) = (Arc::clone(&afd), Arc::clone(&slave), port.clone());
             tokio::spawn(async move {
@@ -260,7 +282,7 @@ async fn write_master(afd: &AsyncFd<OwnedFd>, mut data: &[u8]) -> std::io::Resul
 /// Look at the slave's termios and apply a change to the port.
 async fn sync_line(slave: &OwnedFd, port: &SerialPort, last: &mut Observed) {
     let Ok(t) = tcgetattr(slave) else { return };
-    let now = observe(&t);
+    let now = merge_observed(observe(&t), port.line(), kernel_forces_8n());
     if now == *last {
         return;
     }
@@ -383,6 +405,25 @@ mod tests {
             configure(&mut t, &want).unwrap();
             assert_eq!(observe(&t), want);
         }
+    }
+
+    #[test]
+    fn linux_keeps_data_bits_and_parity_of_the_port() {
+        let port_line = Line {
+            baud: 115_200,
+            data_bits: 7,
+            parity: Parity::Even,
+            stop_bits: StopBits::One,
+        };
+        // The kernel reports 8N1 at a new speed with stop bits 2 and RTS/CTS.
+        let seen = obs(Parity::None, StopBits::Two, 8, Flow::RtsCts, 57_600);
+        let merged = merge_observed(seen, port_line, true);
+        assert_eq!(merged.line.baud, 57_600);
+        assert_eq!(merged.line.stop_bits, StopBits::Two);
+        assert_eq!((merged.line.data_bits, merged.line.parity), (7, Parity::Even));
+        assert_eq!(merged.flow, Flow::RtsCts);
+        // Where the PTY carries everything (macOS) the observation is used as it is.
+        assert_eq!(merge_observed(seen, port_line, false), seen);
     }
 
     #[test]

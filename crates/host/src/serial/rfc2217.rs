@@ -230,16 +230,21 @@ pub fn com_port(command: u8, args: &[u8]) -> Vec<u8> {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct OptState {
-    /// We said WILL (or WONT) and the peer has not contradicted it.
+    /// We enabled the option on our side (we said WILL and it is agreed, or they asked).
     us: bool,
-    us_sent: bool,
+    /// We sent WILL and wait for DO or DONT.
+    us_pending: bool,
+    /// The peer enabled the option on its side.
     them: bool,
-    them_sent: bool,
+    /// We sent DO and wait for WILL or WONT.
+    them_pending: bool,
+    /// We already answered an unsupported DO / WILL with WONT / DONT.
     refused_do: bool,
     refused_will: bool,
 }
 
-/// Answers option negotiation without loops: only a change of state is answered.
+/// Answers option negotiation without loops (in the spirit of RFC 1143): a request is
+/// pending until the peer answers or refuses it, and only a change of state is answered.
 #[derive(Debug)]
 pub struct Negotiator {
     opts: Vec<OptState>,
@@ -251,7 +256,7 @@ fn supported(option: u8) -> bool {
 
 impl Negotiator {
     /// What the server sends on connect: WILL BINARY, DO BINARY, WILL SGA, DO COM-PORT-OPTION
-    /// (RFC 2217 §1: the client says WILL, the access server DO).
+    /// (RFC 2217 section 1: the client says WILL, the access server DO).
     pub fn new() -> (Negotiator, Vec<u8>) {
         let mut n = Negotiator {
             opts: vec![OptState::default(); 256],
@@ -265,8 +270,8 @@ impl Negotiator {
         ] {
             let s = &mut n.opts[opt as usize];
             match verb {
-                Verb::Will => s.us_sent = true,
-                _ => s.them_sent = true,
+                Verb::Will => s.us_pending = true,
+                _ => s.them_pending = true,
             }
             out.extend(negotiate(verb, opt));
         }
@@ -277,67 +282,69 @@ impl Negotiator {
     pub fn on_negotiate(&mut self, verb: Verb, option: u8) -> Vec<u8> {
         let s = &mut self.opts[option as usize];
         match verb {
-            // The peer asks us to enable (or confirms our WILL).
+            // The peer asks us to enable (or agrees to our WILL).
             Verb::Do => {
-                if supported(option) {
-                    if s.us {
-                        return Vec::new();
-                    }
+                if !supported(option) {
+                    return if std::mem::replace(&mut s.refused_do, true) {
+                        Vec::new()
+                    } else {
+                        negotiate(Verb::Wont, option)
+                    };
+                }
+                if std::mem::take(&mut s.us_pending) {
                     s.us = true;
-                    if s.us_sent {
-                        return Vec::new(); // it agreed with our WILL
-                    }
-                    s.us_sent = true;
-                    negotiate(Verb::Will, option)
-                } else if s.refused_do {
-                    Vec::new()
-                } else {
-                    s.refused_do = true;
-                    negotiate(Verb::Wont, option)
+                    return Vec::new();
                 }
+                if std::mem::replace(&mut s.us, true) {
+                    return Vec::new();
+                }
+                negotiate(Verb::Will, option)
             }
+            // The peer refuses (our WILL) or switches the option off.
             Verb::Dont => {
-                if s.us {
-                    s.us = false;
-                    negotiate(Verb::Wont, option)
-                } else {
-                    Vec::new()
+                s.refused_do = false;
+                if std::mem::take(&mut s.us_pending) {
+                    return Vec::new();
                 }
+                if std::mem::take(&mut s.us) {
+                    return negotiate(Verb::Wont, option);
+                }
+                Vec::new()
             }
-            // The peer offers to enable (or confirms our DO).
+            // The peer offers to enable (or agrees to our DO).
             Verb::Will => {
-                if matches!(option, OPT_BINARY | OPT_SGA | OPT_COM_PORT) {
-                    if s.them {
-                        return Vec::new();
-                    }
-                    s.them = true;
-                    if s.them_sent {
-                        return Vec::new();
-                    }
-                    s.them_sent = true;
-                    negotiate(Verb::Do, option)
-                } else if s.refused_will {
-                    Vec::new()
-                } else {
-                    s.refused_will = true;
-                    negotiate(Verb::Dont, option)
+                if !supported(option) {
+                    return if std::mem::replace(&mut s.refused_will, true) {
+                        Vec::new()
+                    } else {
+                        negotiate(Verb::Dont, option)
+                    };
                 }
+                if std::mem::take(&mut s.them_pending) {
+                    s.them = true;
+                    return Vec::new();
+                }
+                if std::mem::replace(&mut s.them, true) {
+                    return Vec::new();
+                }
+                negotiate(Verb::Do, option)
             }
             Verb::Wont => {
-                if s.them {
-                    s.them = false;
-                    negotiate(Verb::Dont, option)
-                } else {
-                    Vec::new()
+                s.refused_will = false;
+                if std::mem::take(&mut s.them_pending) {
+                    return Vec::new();
                 }
+                if std::mem::take(&mut s.them) {
+                    return negotiate(Verb::Dont, option);
+                }
+                Vec::new()
             }
         }
     }
 
-    /// The client agreed to the COM-PORT-OPTION (WILL), or asked for it (DO).
-    pub fn com_port_enabled(&self) -> bool {
-        let s = &self.opts[OPT_COM_PORT as usize];
-        s.them || s.us
+    /// Whether the peer has the option on (it said WILL, or agreed to our DO).
+    pub fn peer_enabled(&self, option: u8) -> bool {
+        self.opts[option as usize].them
     }
 }
 
@@ -613,7 +620,7 @@ mod tests {
         assert!(n.on_negotiate(Verb::Will, OPT_BINARY).is_empty());
         assert!(n.on_negotiate(Verb::Do, OPT_SGA).is_empty());
         assert!(n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty());
-        assert!(n.com_port_enabled());
+        assert!(n.peer_enabled(OPT_COM_PORT));
         assert!(n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty(), "no loop");
         // The client's own offer of SGA is accepted once.
         assert_eq!(n.on_negotiate(Verb::Will, OPT_SGA), vec![IAC, DO, 3]);
@@ -628,17 +635,48 @@ mod tests {
             n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty(),
             "our DO already asked"
         );
-        assert!(n.com_port_enabled());
+        assert!(n.peer_enabled(OPT_COM_PORT));
         // A client that sends DO instead (not per the RFC) gets WILL once and works.
         let (mut n, _) = Negotiator::new();
         assert_eq!(n.on_negotiate(Verb::Do, OPT_COM_PORT), vec![IAC, WILL, 44]);
         assert!(n.on_negotiate(Verb::Do, OPT_COM_PORT).is_empty(), "not answered twice");
-        assert!(n.com_port_enabled());
         // WONT / DONT turn it off and are confirmed once.
         let (mut n, _) = Negotiator::new();
         n.on_negotiate(Verb::Will, OPT_COM_PORT);
         assert_eq!(n.on_negotiate(Verb::Wont, OPT_COM_PORT), vec![IAC, DONT, 44]);
-        assert!(!n.com_port_enabled());
+        assert!(!n.peer_enabled(OPT_COM_PORT));
+    }
+
+    #[test]
+    fn renegotiation_after_a_refusal_is_answered() {
+        // The client refuses our DO, then changes its mind: its WILL is answered with DO.
+        let (mut n, _) = Negotiator::new();
+        assert!(
+            n.on_negotiate(Verb::Wont, OPT_COM_PORT).is_empty(),
+            "refusal of our request"
+        );
+        assert!(!n.peer_enabled(OPT_COM_PORT));
+        assert_eq!(n.on_negotiate(Verb::Will, OPT_COM_PORT), vec![IAC, DO, 44]);
+        assert!(n.peer_enabled(OPT_COM_PORT));
+        assert!(n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty(), "no loop");
+        // It switches off and on again.
+        assert_eq!(n.on_negotiate(Verb::Wont, OPT_COM_PORT), vec![IAC, DONT, 44]);
+        assert_eq!(n.on_negotiate(Verb::Will, OPT_COM_PORT), vec![IAC, DO, 44]);
+
+        // Our WILL is refused, and later the client asks for it with DO: answered with WILL.
+        let (mut n, _) = Negotiator::new();
+        assert!(n.on_negotiate(Verb::Dont, OPT_SGA).is_empty());
+        assert_eq!(n.on_negotiate(Verb::Do, OPT_SGA), vec![IAC, WILL, 3]);
+        assert!(n.on_negotiate(Verb::Do, OPT_SGA).is_empty());
+        assert_eq!(n.on_negotiate(Verb::Dont, OPT_SGA), vec![IAC, WONT, 3]);
+        assert_eq!(n.on_negotiate(Verb::Do, OPT_SGA), vec![IAC, WILL, 3]);
+
+        // An unsupported option refused once; after the peer withdraws it may be refused again.
+        let (mut n, _) = Negotiator::new();
+        assert_eq!(n.on_negotiate(Verb::Do, 24), vec![IAC, WONT, 24]);
+        assert!(n.on_negotiate(Verb::Do, 24).is_empty());
+        assert!(n.on_negotiate(Verb::Dont, 24).is_empty());
+        assert_eq!(n.on_negotiate(Verb::Do, 24), vec![IAC, WONT, 24]);
     }
 
     #[test]
@@ -669,7 +707,6 @@ mod tests {
         // DONT of an enabled option is confirmed.
         n.on_negotiate(Verb::Do, OPT_COM_PORT);
         assert_eq!(n.on_negotiate(Verb::Dont, OPT_COM_PORT), vec![IAC, WONT, 44]);
-        assert!(!n.com_port_enabled());
     }
 
     #[test]
