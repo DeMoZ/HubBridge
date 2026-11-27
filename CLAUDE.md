@@ -45,5 +45,6 @@ sync when the protocol or the scope changes.
 - Kotlin ↔ Rust is JSON over JNI; field names in `UsbScanner.kt` must match
   `AndroidDevice` / `ConfigInfo` in `crates/android` and `crates/proto` (test
   `parses_scanner_json`).
-- Windows is a supported host platform in code (CI checks it); no Windows release builds
-  unless Roman asks.
+- Desktop platforms are macOS and Windows. Windows is supported in code (CI checks it); no
+  Windows release builds unless Roman asks. **No Linux builds of the desktop app**: Linux CI
+  only checks the libraries and the CLI (`--exclude hubbridge-desktop`).

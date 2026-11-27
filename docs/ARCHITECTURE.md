@@ -23,7 +23,7 @@ flowchart LR
     UI --> SVC --> SCAN --> CORE
   end
 
-  subgraph Desktop["macOS / Windows / Linux — Host"]
+  subgraph Desktop["macOS / Windows — Host"]
     direction TB
     HOSTLIB["hubbridge-host (Rust lib)<br/>discovery · pairing · session · reconnect · RTT"]
     CLI["hubbridge CLI (step 1)"]
@@ -66,7 +66,8 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Step 1 front end is the `hubbridge` CLI (`discover`, `pair`, `info`, `devices`, `grant`,
   `ping`, `watch`, `adb`, `agents`, `forget`). Step 4 adds a tray app on tao + wry +
   tray-icon (same stack as UsbMemoryChecker / 360Cleaner), talking to the same library.
-- The same code builds for macOS, Windows and Linux.
+- Targets macOS and Windows. The libraries and the CLI also build on Linux (CI runs their
+  tests there); no Linux builds of the window are made.
 
 ### 3. OS integration layer (steps 2–3, design)
 
@@ -145,7 +146,7 @@ HubBridge/
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
 ├── docs/                      ARCHITECTURE, LIMITATIONS, PROTOCOL, ROADMAP
-└── .github/workflows/ci.yml   fmt, clippy, tests on macOS/Windows/Linux; APK build
+└── .github/workflows/ci.yml   fmt, clippy, tests on macOS/Windows (+ libraries on Linux); APK
 ```
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`

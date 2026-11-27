@@ -1,6 +1,6 @@
 [package]
 name = "hubbridge-host"
-description = "HubBridge desktop host (macOS, Windows, Linux): discovery, pairing, ADB forwarding, device list, RTT; library + `hubbridge` CLI"
+description = "HubBridge desktop host (macOS, Windows): discovery, pairing, ADB forwarding, device list, RTT; library + `hubbridge` CLI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

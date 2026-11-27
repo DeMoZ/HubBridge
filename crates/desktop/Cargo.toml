@@ -1,6 +1,6 @@
 [package]
 name = "hubbridge-desktop"
-description = "HubBridge desktop app window (macOS, Windows, Linux): phones over Wi-Fi and ADB, pairing, live link status, USB devices"
+description = "HubBridge desktop app window (macOS, Windows): phones over Wi-Fi and ADB, pairing, live link status, USB devices"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
