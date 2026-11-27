@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon monochrome layer (Android 13 themed icons): the HubBridge mark (two nodes joined by an arc over a baseline), kept inside
+     the 66dp safe zone of the 108dp canvas. Same drawing as scripts/make-icon.swift and the desktop logo.
+     Only the alpha of this layer is used. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#000000" android:strokeWidth="5.28" android:strokeLineCap="round" android:pathData="M37.2,59.4C44.4,37.8 63.6,37.8 70.8,59.4">
+    </path>
+    <path android:fillColor="#000000" android:pathData="M31.92,59.4a5.28,5.28 0 1,0 10.56,0a5.28,5.28 0 1,0 -10.56,0z">
+    </path>
+    <path android:fillColor="#000000" android:pathData="M65.52,59.4a5.28,5.28 0 1,0 10.56,0a5.28,5.28 0 1,0 -10.56,0z">
+    </path>
+    <path android:strokeColor="#000000" android:strokeWidth="3.84" android:strokeLineCap="round" android:strokeAlpha="0.5" android:pathData="M32.4,69.0H75.6">
+    </path>
+</vector>

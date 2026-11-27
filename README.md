@@ -40,6 +40,8 @@ More: [architecture](docs/ARCHITECTURE.md) · [protocol](docs/PROTOCOL.md) ·
 cargo run -p hubbridge-desktop --release      # opens the HubBridge window
 ```
 
+![HubBridge desktop window](docs/screenshot-desktop.png)
+
 - **On this network**: phones running HubBridge (mDNS), paired or not; Pair (PIN), Connect,
   Forget; connect by IP if mDNS is blocked.
 - **USB and ADB**: phones seen by `adb` over the cable or Wi-Fi, grouped per phone; **Install

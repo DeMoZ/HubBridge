@@ -74,6 +74,27 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
   tray-icon (same stack as UsbMemoryChecker / 360Cleaner), talking to the same library.
 - Targets macOS and Windows (the phone side is Android). There is no Linux platform.
 
+### Desktop window (`crates/desktop`)
+
+- One page, `src/ui/index.html`, compiled in with `include_str!`; Rust pushes the whole model
+  as JSON (`window.onState`), the page sends `{"action": ...}` requests through `send()`.
+  Never declare a top-level `ipc` in the page script (wry owns `window.ipc`).
+- Look ("Ambient Glass", dark and light following the system): every color, type size, radius,
+  elevation and duration is a token in the page's `:root` blocks, colors as literals. Dark is the
+  base `:root`; the light set is written twice (the `prefers-color-scheme: light` media query and
+  `:root[data-theme="light"]`) and the increased-contrast / reduced-transparency opaque overrides
+  likewise (the reduced-transparency overrides take effect in WebView2 on Windows only; macOS WebKit
+  has no `prefers-reduced-transparency`, so the page relies on `prefers-contrast: more`, Increase contrast). Tests in `src/main.rs` keep the copies equal, check WCAG contrast of the real surface
+  stacks (text on cards, chips, buttons, placeholders), allow only plain tokens as text colors, and
+  guard that the page declares no top-level `ipc` and loads nothing from the network.
+- `data-theme` on `<html>` forces a theme: `HUBBRIDGE_DEV_SCRIPT="document.documentElement.dataset.theme='light'"`
+  (or `'dark'`) is how screenshots of both themes are made.
+- Sheets use `openSheet(id)` / `closeSheet(id)`: Escape and a backdrop click close them, the rest of
+  the page is `inert` while one is open, and focus returns to the opener.
+- The app icon is drawn by `scripts/make-icon.swift`; `scripts/make-icon.sh` writes
+  `crates/desktop/assets/icon.png` and `AppIcon.icns` (macOS only, outputs are committed). The Android
+  launcher icon is an adaptive icon with the same mark.
+
 ### 3. OS integration layer (steps 2–3, design)
 
 **USB devices — two paths:**
@@ -149,6 +170,7 @@ HubBridge/
 │   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
+│       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh)
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)
 │   └── app/src/main/kotlin/com/demoz/hubbridge/
 │       ├── MainActivity.kt    UI
@@ -156,6 +178,7 @@ HubBridge/
 │       ├── UsbScanner.kt      UsbManager → JSON
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
+├── scripts/                   make-icon.sh / make-icon.swift: redraw the app icon (macOS)
 ├── docs/                      ARCHITECTURE, LIMITATIONS, PROTOCOL, ROADMAP
 └── .github/workflows/ci.yml   fmt, clippy, tests on macOS and Windows; APK
 ```
