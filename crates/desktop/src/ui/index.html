@@ -191,6 +191,7 @@ button.pill:hover { background: var(--surface-2); color: var(--text-1); }
 .main { display: grid; grid-template-columns: minmax(320px, 360px) 1fr; gap: var(--sp-4); padding: var(--sp-2) var(--sp-5) var(--sp-5); min-height: 0; }
 /* inline padding + matching negative margin: the panel shadow reaches into the padding instead of being clipped; the facing sides take half the gap so the columns do not overlap */
 .col { min-height: 0; min-width: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--sp-4); padding: 0 14px var(--sp-5); margin: 0 -14px; }
+.panel:focus-visible { outline-offset: -2px; }
 .col:first-child { padding-right: calc(var(--sp-4) / 2); margin-right: calc(var(--sp-4) / -2); }
 .col:last-child { padding-left: calc(var(--sp-4) / 2); margin-left: calc(var(--sp-4) / -2); }
 .col::-webkit-scrollbar { width: 8px; } .col::-webkit-scrollbar-thumb { background: var(--edge-strong); border-radius: 8px; }

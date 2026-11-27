@@ -743,15 +743,59 @@ mod tests {
             let at = PAGE
                 .find(&format!("id=\"{id}\""))
                 .unwrap_or_else(|| panic!("put host #{id} missing in the markup"));
-            let start = PAGE[..at].rfind("<section").unwrap_or(0);
-            let section = &PAGE[start..at + PAGE[at..].find("</section>").unwrap_or(0)];
-            if id.starts_with("st") {
+            if ["stMark", "stText", "stLive"].contains(&id) {
                 continue;
             }
-            assert!(
-                section.contains("tabindex=\"-1\""),
-                "panel of #{id} has no focusable heading or tabindex=-1 fallback"
-            );
+            let mut open: Vec<usize> = Vec::new();
+            let mut i = 0;
+            while i < at {
+                let rest = &PAGE[i..at];
+                let (o, c) = (rest.find("<section"), rest.find("</section>"));
+                match (o, c) {
+                    (Some(o), c) if c.is_none_or(|c| o < c) => {
+                        open.push(i + o);
+                        i += o + 1;
+                    }
+                    (_, Some(c)) => {
+                        open.pop();
+                        i += c + 1;
+                    }
+                    _ => break,
+                }
+            }
+            let tag_of = |p: usize| &PAGE[p..p + PAGE[p..].find('>').unwrap()];
+            let panel = *open
+                .iter()
+                .rev()
+                .find(|&&p| tag_of(p).contains("class=\"panel\""))
+                .unwrap_or_else(|| panic!("put host #{id} is not inside a panel section"));
+            let mut depth = 0;
+            let mut end = panel;
+            for (j, _) in PAGE[panel..].match_indices('<') {
+                let t = &PAGE[panel + j..];
+                if t.starts_with("<section") {
+                    depth += 1;
+                } else if t.starts_with("</section>") {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = panel + j;
+                        break;
+                    }
+                }
+            }
+            assert!(end > at, "panel of #{id} does not enclose it");
+            let body = &PAGE[panel..end];
+            let focusable = |tag: &str| tag.contains("tabindex=\"-1\"");
+            match body.find("<h2") {
+                Some(h) => assert!(
+                    focusable(&body[h..h + body[h..].find('>').unwrap()]),
+                    "first h2 of the panel of #{id} has no tabindex=-1"
+                ),
+                None => assert!(
+                    focusable(tag_of(panel)),
+                    "panel of #{id} has no h2 and no tabindex=-1 on itself"
+                ),
+            }
         }
     }
 }
