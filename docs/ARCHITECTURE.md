@@ -135,7 +135,7 @@ HubBridge/
 │   ├── link/                  record layer, SPAKE2 pairing, Noise sessions (tokio)
 │   ├── agent/                 agent core: server, pairing window, sessions, device registry
 │   ├── android/               JNI cdylib libhubbridge_android.so (built with cargo-ndk)
-│   ├── agent-sim/             desktop agent with fake devices (CP2102 UART, HID keyboard)
+│   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)

@@ -8,6 +8,11 @@
 //! hubbridge pair 127.0.0.1 --pin 123456
 //! hubbridge devices
 //! ```
+//!
+//! Fake devices: 1002 CP210x (CP2102, loops TX back to RX), 1003 HID keyboard without
+//! permission, 1004 flash drive, 1005 FT232R, 1006 FT2232H (two ports), 1007 FT232H,
+//! 1008 CH340, 1009 CDC-ACM. The UART adapters and the CDC device answer their chip's control
+//! requests and loop bulk data back, so `hubbridge serial <id>` works against each.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -15,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hubbridge_agent::fake::{FakeKind, FakeUsb};
+use hubbridge_agent::fake::{FakeKind, FakeUsb, SerialChip};
 use hubbridge_agent::{Agent, AgentCallbacks, AgentConfig};
 use hubbridge_proto::{DEFAULT_PORT, MDNS_SERVICE_TYPE, PROTO_VERSION, fixtures};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -81,17 +86,64 @@ async fn main() -> Result<()> {
     let uart = fixtures::cp2102_uart(1002);
     let keyboard = fixtures::without_permission(fixtures::hid_keyboard(1003));
     let drive = fixtures::flash_drive(1004);
-    agent.set_devices(vec![uart.clone(), keyboard.clone(), drive.clone()]);
+    let extra = vec![
+        fixtures::ft232r_uart(1005),
+        fixtures::ft2232h_uart(1006),
+        fixtures::ft232h_uart(1007),
+        fixtures::ch340_uart(1008),
+        fixtures::cdc_acm_simple(1009),
+    ];
+    let mut all = vec![uart.clone(), keyboard.clone(), drive.clone()];
+    all.extend(extra.iter().cloned());
+    agent.set_devices(all);
 
-    // Fake USB behind them: the UART echoes bulk data, the drive answers SCSI (32 MiB).
+    // Fake USB behind them: the UARTs answer their chip's requests and loop bulk data back,
+    // the drive answers SCSI (32 MiB).
     let usb = FakeUsb::new();
     usb.add(
         1002,
         fixtures::cp2102_raw(),
         &["Silicon Labs", "CP2102 USB to UART Bridge Controller", "0001"],
-        FakeKind::Loopback,
+        FakeKind::Serial(SerialChip::Cp210x { partnum: 2 }),
         true,
     );
+    for (id, raw, strings, chip) in [
+        (
+            1005,
+            fixtures::ft232r_raw(),
+            ["FTDI", "FT232R USB UART", "A50285BI"],
+            SerialChip::Ftdi,
+        ),
+        (
+            1006,
+            fixtures::ft2232h_raw(),
+            ["FTDI", "Dual RS232-HS", "FT2232H01"],
+            SerialChip::Ftdi,
+        ),
+        (
+            1007,
+            fixtures::ft232h_raw(),
+            ["FTDI", "Single RS232-HS", "FT232H001"],
+            SerialChip::Ftdi,
+        ),
+        (
+            1008,
+            fixtures::ch340_raw(),
+            ["wch.cn", "USB Serial", "0001"],
+            SerialChip::Ch34x {
+                version: 0x31,
+                limited_prescaler: false,
+            },
+        ),
+        (
+            1009,
+            fixtures::cdc_acm_simple_raw(),
+            ["HubBridge", "CDC ACM Serial", "CDC0001"],
+            SerialChip::CdcAcm,
+        ),
+    ] {
+        usb.add(id, raw, &strings, FakeKind::Serial(chip), true);
+    }
     usb.add(
         1003,
         fixtures::hid_keyboard_raw(),
@@ -139,6 +191,7 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(secs)).await;
                 present = !present;
                 let mut list = vec![uart.clone(), drive.clone()];
+                list.extend(extra.iter().cloned());
                 if present {
                     list.push(keyboard.clone());
                 }
