@@ -893,3 +893,532 @@ mod pty {
         p.close().await;
     }
 }
+
+// --- 6.4 raw TCP, 6.6 RFC 2217, 6.7 the bridge -------------------------------------------------
+
+mod net {
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+
+    use hubbridge_host::serial::bridge::{BridgeOptions, SerialBridge};
+    use hubbridge_host::serial::rfc2217 as r;
+    use hubbridge_host::serial::tcp::{TcpFront, TcpOptions};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use super::*;
+
+    const LOCAL: &str = "127.0.0.1:0";
+
+    async fn raw_front(e: &Env, id: u32) -> (SerialPort, TcpFront) {
+        let p = e.open(id).await;
+        let t = TcpFront::start(p.clone(), LOCAL.parse().unwrap(), TcpOptions::default())
+            .await
+            .unwrap();
+        (p, t)
+    }
+
+    async fn read_n(s: &mut TcpStream, n: usize) -> Vec<u8> {
+        let mut got = vec![0u8; n];
+        tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut got))
+            .await
+            .expect("bytes should arrive")
+            .unwrap();
+        got
+    }
+
+    #[tokio::test]
+    async fn raw_client_round_trip_keeps_every_byte() {
+        let e = env().await;
+        let (p, t) = raw_front(&e, CP2102).await;
+        let mut c = TcpStream::connect(t.addr()).await.unwrap();
+        let all: Vec<u8> = (0..=255u8).collect();
+        c.write_all(&all).await.unwrap();
+        assert_eq!(read_n(&mut c, 256).await, all);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn second_client_is_closed_and_first_keeps_working() {
+        let e = env().await;
+        let (p, t) = raw_front(&e, CP2102).await;
+        let mut first = TcpStream::connect(t.addr()).await.unwrap();
+        first.write_all(b"one").await.unwrap();
+        assert_eq!(read_n(&mut first, 3).await, b"one");
+        let mut second = TcpStream::connect(t.addr()).await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(3), second.read(&mut buf))
+            .await
+            .expect("the second connection is closed")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        first.write_all(b"two").await.unwrap();
+        assert_eq!(read_n(&mut first, 3).await, b"two");
+        // After the first leaves, a new client is served.
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut third = TcpStream::connect(t.addr()).await.unwrap();
+        third.write_all(b"three").await.unwrap();
+        assert_eq!(read_n(&mut third, 5).await, b"three");
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn data_while_nobody_is_connected_is_not_kept() {
+        let e = env().await;
+        let (p, t) = raw_front(&e, CP2102).await;
+        e.usb.inject_rx(CP2102, b"nobody listens");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut c = TcpStream::connect(t.addr()).await.unwrap();
+        c.write_all(b"fresh").await.unwrap();
+        assert_eq!(read_n(&mut c, 5).await, b"fresh");
+        assert_eq!(p.stats().rx_dropped, 0);
+        t.stop();
+        p.close().await;
+    }
+
+    // A small RFC 2217 client.
+    struct Rfc {
+        s: TcpStream,
+        parser: r::Parser,
+        data: Vec<u8>,
+        subs: VecDeque<Vec<u8>>,
+        raw: Vec<u8>,
+        negotiations: Vec<(r::Verb, u8)>,
+    }
+
+    impl Rfc {
+        async fn connect(addr: SocketAddr) -> Rfc {
+            let mut c = Rfc {
+                s: TcpStream::connect(addr).await.unwrap(),
+                parser: r::Parser::new(),
+                data: Vec::new(),
+                subs: VecDeque::new(),
+                raw: Vec::new(),
+                negotiations: Vec::new(),
+            };
+            // Read the server's opening negotiation and agree.
+            while c.negotiations.len() < 4 {
+                c.pump().await;
+            }
+            for (verb, opt) in c.negotiations.clone() {
+                let answer = match (verb, opt) {
+                    (r::Verb::Will, o) => r::negotiate(r::Verb::Do, o),
+                    (r::Verb::Do, o) => r::negotiate(r::Verb::Will, o),
+                    _ => continue,
+                };
+                c.s.write_all(&answer).await.unwrap();
+            }
+            c
+        }
+
+        async fn pump(&mut self) {
+            let mut buf = [0u8; 4096];
+            let n = tokio::time::timeout(Duration::from_secs(5), self.s.read(&mut buf))
+                .await
+                .expect("the server answers")
+                .unwrap();
+            assert!(n > 0, "server closed the connection");
+            self.raw.extend_from_slice(&buf[..n]);
+            for ev in self.parser.feed(&buf[..n]) {
+                match ev {
+                    r::Event::Data(d) => self.data.extend(d),
+                    r::Event::Negotiate { verb, option } => self.negotiations.push((verb, option)),
+                    r::Event::Sub { option, data } => {
+                        if option == r::OPT_COM_PORT {
+                            self.subs.push_back(data);
+                        }
+                    }
+                }
+            }
+        }
+
+        async fn cmd(&mut self, command: u8, args: &[u8]) {
+            self.s.write_all(&r::com_port(command, args)).await.unwrap();
+        }
+
+        /// The next sub-negotiation with this code (others stay queued).
+        async fn sub(&mut self, code: u8) -> Vec<u8> {
+            loop {
+                if let Some(i) = self.subs.iter().position(|s| s[0] == code) {
+                    return self.subs.remove(i).unwrap()[1..].to_vec();
+                }
+                self.pump().await;
+            }
+        }
+
+        async fn no_sub(&mut self, code: u8, wait: Duration) -> bool {
+            let end = tokio::time::Instant::now() + wait;
+            while tokio::time::Instant::now() < end {
+                let left = end - tokio::time::Instant::now();
+                let mut buf = [0u8; 4096];
+                if let Ok(Ok(n)) = tokio::time::timeout(left, self.s.read(&mut buf)).await {
+                    for ev in self.parser.feed(&buf[..n]) {
+                        match ev {
+                            r::Event::Data(d) => self.data.extend(d),
+                            r::Event::Sub { option: 44, data } => self.subs.push_back(data),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            !self.subs.iter().any(|s| s[0] == code)
+        }
+
+        async fn data(&mut self, n: usize) -> Vec<u8> {
+            while self.data.len() < n {
+                self.pump().await;
+            }
+            self.data.drain(..n).collect()
+        }
+    }
+
+    async fn rfc_front(e: &Env, id: u32, lock_line: bool) -> (SerialPort, TcpFront, Rfc) {
+        let p = e.open(id).await;
+        let t = TcpFront::start(
+            p.clone(),
+            LOCAL.parse().unwrap(),
+            TcpOptions {
+                rfc2217: true,
+                lock_line,
+                label: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let c = Rfc::connect(t.addr()).await;
+        (p, t, c)
+    }
+
+    #[tokio::test]
+    async fn rfc2217_negotiation_and_signature() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_COM_PORT)));
+        assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_BINARY)));
+        assert!(c.negotiations.contains(&(r::Verb::Do, r::OPT_BINARY)));
+        assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_SGA)));
+        c.cmd(r::CMD_SIGNATURE, &[]).await;
+        let sig = c.sub(100).await;
+        assert!(String::from_utf8_lossy(&sig).starts_with("HubBridge "));
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_set_baud_rate_replies_after_the_device_took_it() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        c.s.write_all(&[0xff, 0xfa, 0x2c, 0x01, 0x00, 0x01, 0xc2, 0x00, 0xff, 0xf0])
+            .await
+            .unwrap();
+        // Exactly the bytes of the spec.
+        let want = [0xff, 0xfa, 0x2c, 0x65, 0x00, 0x01, 0xc2, 0x00, 0xff, 0xf0];
+        while !c.raw.windows(want.len()).any(|w| w == want) {
+            c.pump().await;
+        }
+        assert_eq!(
+            e.usb.serial_state(CP2102).baud,
+            115_200,
+            "the device had it when the reply arrived"
+        );
+        assert_eq!(c.sub(101).await, 115_200u32.to_be_bytes());
+        c.cmd(r::CMD_SET_BAUDRATE, &57_600u32.to_be_bytes()).await;
+        assert_eq!(c.sub(101).await, 57_600u32.to_be_bytes());
+        assert_eq!(e.usb.serial_state(CP2102).baud, 57_600);
+        // Data size, parity, stop size.
+        c.cmd(r::CMD_SET_DATASIZE, &[7]).await;
+        assert_eq!(c.sub(102).await, vec![7]);
+        c.cmd(r::CMD_SET_PARITY, &[3]).await;
+        assert_eq!(c.sub(103).await, vec![3]);
+        c.cmd(r::CMD_SET_STOPSIZE, &[2]).await;
+        assert_eq!(c.sub(104).await, vec![2]);
+        let d = e.usb.serial_state(CP2102);
+        assert_eq!((d.data_bits, d.parity, d.stop_bits), (7, 2, 2));
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_query_changes_nothing() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        let before = e.usb.serial_log(CP2102).len();
+        c.cmd(r::CMD_SET_DATASIZE, &[0]).await;
+        assert_eq!(c.sub(102).await, vec![8]);
+        c.cmd(r::CMD_SET_BAUDRATE, &0u32.to_be_bytes()).await;
+        assert_eq!(c.sub(101).await, 115_200u32.to_be_bytes());
+        c.cmd(r::CMD_SET_PARITY, &[0]).await;
+        assert_eq!(c.sub(103).await, vec![1]);
+        c.cmd(r::CMD_SET_STOPSIZE, &[0]).await;
+        assert_eq!(c.sub(104).await, vec![1]);
+        assert_eq!(e.usb.serial_log(CP2102).len(), before, "the device got no request");
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_escapes_ff_both_ways() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        // From the device: one 0xff arrives doubled.
+        e.usb.inject_rx(CP2102, &[0x01, 0xff, 0x02]);
+        c.raw.clear();
+        assert_eq!(c.data(3).await, vec![0x01, 0xff, 0x02]);
+        assert!(
+            c.raw.windows(2).any(|w| w == [0xff, 0xff]),
+            "doubled on the wire: {:?}",
+            c.raw
+        );
+        // To the device: ff ff is one byte.
+        e.usb.clear_serial_log(CP2102);
+        c.s.write_all(&[b'a', 0xff, 0xff, b'b']).await.unwrap();
+        assert_eq!(c.data(3).await, vec![b'a', 0xff, b'b'], "looped back, unescaped");
+        let sent: usize = e
+            .usb
+            .serial_log(CP2102)
+            .iter()
+            .map(|ev| if let SerialEvent::Out { len } = ev { *len } else { 0 })
+            .sum();
+        assert_eq!(sent, 3);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_dtr_rts_break_and_flow() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        c.cmd(r::CMD_SET_CONTROL, &[9]).await;
+        assert_eq!(c.sub(105).await, vec![9]);
+        c.cmd(r::CMD_SET_CONTROL, &[11]).await;
+        assert_eq!(c.sub(105).await, vec![11]);
+        c.cmd(r::CMD_SET_CONTROL, &[5]).await;
+        assert_eq!(c.sub(105).await, vec![5]);
+        let d = e.usb.serial_state(CP2102);
+        assert!(!d.dtr && d.rts && d.break_on);
+        // Queries.
+        c.cmd(r::CMD_SET_CONTROL, &[7]).await;
+        assert_eq!(c.sub(105).await, vec![9]);
+        c.cmd(r::CMD_SET_CONTROL, &[4]).await;
+        assert_eq!(c.sub(105).await, vec![5]);
+        // XON/XOFF is not supported: the flow in effect comes back.
+        c.cmd(r::CMD_SET_CONTROL, &[2]).await;
+        assert_eq!(c.sub(105).await, vec![1]);
+        c.cmd(r::CMD_SET_CONTROL, &[3]).await;
+        assert_eq!(c.sub(105).await, vec![3]);
+        assert!(e.usb.serial_state(CP2102).flow_rtscts);
+        c.cmd(r::CMD_SET_CONTROL, &[13]).await;
+        assert_eq!(c.sub(105).await, vec![16]);
+        // Purge.
+        e.usb.clear_serial_log(CP2102);
+        c.cmd(r::CMD_PURGE_DATA, &[3]).await;
+        assert_eq!(c.sub(112).await, vec![3]);
+        assert!(requests(&e.usb, CP2102).contains(&(0x41, 0x12, 0x000f, 0)));
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_modem_and_line_notifications() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CDC, false).await;
+        e.usb.set_modem(
+            CDC,
+            ModemLines {
+                dcd: true,
+                ..Default::default()
+            },
+        );
+        let n = c.sub(107).await;
+        assert_eq!(n[0] & 0x88, 0x88, "DCD and delta DCD: {n:?}");
+        // A framing error with the default line-state mask (0): no notification.
+        e.usb.inject_line_error(CDC, LineErrorKind::Framing);
+        assert!(c.no_sub(106, Duration::from_millis(400)).await);
+        // With the mask set it is reported.
+        c.cmd(r::CMD_SET_LINESTATE_MASK, &[0x08]).await;
+        assert_eq!(c.sub(110).await, vec![0x08]);
+        e.usb.inject_line_error(CDC, LineErrorKind::Framing);
+        assert_eq!(c.sub(106).await, vec![0x08]);
+        // A modem mask that excludes DCD silences it.
+        c.cmd(r::CMD_SET_MODEMSTATE_MASK, &[0x11]).await;
+        assert_eq!(c.sub(111).await, vec![0x11]);
+        let _ = c.sub(107).await; // the current state, sent once when the mask is set
+        e.usb.set_modem(CDC, ModemLines::default());
+        assert!(c.no_sub(107, Duration::from_millis(400)).await);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_flow_control_suspend_and_resume() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        c.cmd(r::CMD_FLOWCONTROL_SUSPEND, &[]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        e.usb.inject_rx(CP2102, b"held back");
+        let quiet = tokio::time::timeout(Duration::from_millis(400), c.pump()).await;
+        assert!(quiet.is_err() && c.data.is_empty(), "nothing is sent while suspended");
+        c.cmd(r::CMD_FLOWCONTROL_RESUME, &[]).await;
+        assert_eq!(c.data(9).await, b"held back");
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_cp210x_modem_polling_follows_the_client() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let t = TcpFront::start(
+            p.clone(),
+            LOCAL.parse().unwrap(),
+            TcpOptions {
+                rfc2217: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut c = Rfc::connect(t.addr()).await;
+        e.usb.clear_serial_log(CP2102);
+        e.usb.set_modem(
+            CP2102,
+            ModemLines {
+                dsr: true,
+                ..Default::default()
+            },
+        );
+        // The default mask is not 0: the port polls and the client hears about DSR.
+        let n = c.sub(107).await;
+        assert_eq!(n[0] & 0x22, 0x22, "{n:?}");
+        // A client that wants no modem status stops the polling.
+        c.cmd(r::CMD_SET_MODEMSTATE_MASK, &[0]).await;
+        assert_eq!(c.sub(111).await, vec![0]);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        e.usb.clear_serial_log(CP2102);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(requests(&e.usb, CP2102).iter().all(|q| q.1 != 0x08));
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn locked_line_answers_with_the_current_values() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, true).await;
+        c.cmd(r::CMD_SET_BAUDRATE, &9600u32.to_be_bytes()).await;
+        assert_eq!(c.sub(101).await, 115_200u32.to_be_bytes());
+        c.cmd(r::CMD_SET_PARITY, &[3]).await;
+        assert_eq!(c.sub(103).await, vec![1]);
+        c.cmd(r::CMD_SET_DATASIZE, &[7]).await;
+        assert_eq!(c.sub(102).await, vec![8]);
+        assert_eq!(e.usb.serial_state(CP2102).baud, 115_200);
+        // DTR is not part of the line: it still works (auto-reset of boards).
+        c.cmd(r::CMD_SET_CONTROL, &[9]).await;
+        assert_eq!(c.sub(105).await, vec![9]);
+        assert!(!e.usb.serial_state(CP2102).dtr);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn bridge_serves_pty_and_rfc2217_together_and_stop_gives_the_device_back() {
+        let e = env().await;
+        let opts = BridgeOptions {
+            pty: cfg!(unix),
+            tcp: Some(LOCAL.parse().unwrap()),
+            rfc2217: true,
+            ..BridgeOptions::default()
+        };
+        let b = SerialBridge::start(Arc::clone(&e.client), e.info(CP2102), opts)
+            .await
+            .unwrap();
+        let info = b.info();
+        assert_eq!(info.driver, "CP210x");
+        assert_eq!((info.line.baud, info.line.data_bits), (115_200, 8));
+        let mut c = Rfc::connect(info.tcp_addr.unwrap()).await;
+        c.s.write_all(b"tcp side").await.unwrap();
+        assert_eq!(c.data(8).await, b"tcp side");
+        #[cfg(unix)]
+        {
+            let path = info.pty_path.clone().expect("a PTY path");
+            let fd = rustix::fs::open(
+                path.as_str(),
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::NONBLOCK,
+                rustix::fs::Mode::empty(),
+            )
+            .unwrap();
+            rustix::io::write(&fd, b"pty side").unwrap();
+            // The device echoes to both front ends.
+            let mut got = Vec::new();
+            for _ in 0..400 {
+                let mut buf = [0u8; 64];
+                if let Ok(n) = rustix::io::read(&fd, &mut buf) {
+                    got.extend_from_slice(&buf[..n]);
+                }
+                if got.len() >= 16 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // The PTY side also sees the echo of what the TCP client wrote first.
+            assert_eq!(got, b"tcp sidepty side");
+            assert_eq!(c.data(8).await, b"pty side");
+        }
+        assert!(b.stats().tx >= 8);
+        b.stop().await;
+        assert_eq!(b.done().await, "port closed");
+        // The device is closed on the agent: another command can open it.
+        e.client.open_device(CP2102).await.unwrap();
+        e.client.close_device(CP2102).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bridge_ends_when_the_device_goes() {
+        let e = env().await;
+        let opts = BridgeOptions {
+            pty: false,
+            tcp: Some(LOCAL.parse().unwrap()),
+            ..BridgeOptions::default()
+        };
+        let b = SerialBridge::start(Arc::clone(&e.client), e.info(CDC), opts)
+            .await
+            .unwrap();
+        let rest: Vec<_> = e.infos.iter().filter(|d| d.id != CDC).cloned().collect();
+        e.agent.set_devices(rest);
+        let reason = tokio::time::timeout(Duration::from_secs(2), b.done()).await.unwrap();
+        assert!(reason.contains("device closed"), "{reason}");
+        // The TCP port is gone with it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(TcpStream::connect(b.info().tcp_addr.unwrap()).await.is_err());
+        b.stop().await;
+    }
+
+    #[tokio::test]
+    async fn bridge_refuses_what_cannot_be_served() {
+        let e = env().await;
+        let none = BridgeOptions {
+            pty: false,
+            tcp: None,
+            ..BridgeOptions::default()
+        };
+        assert!(
+            SerialBridge::start(Arc::clone(&e.client), e.info(CP2102), none)
+                .await
+                .is_err()
+        );
+        // Not a serial device: nothing is opened.
+        let tcp = BridgeOptions {
+            pty: false,
+            tcp: Some(LOCAL.parse().unwrap()),
+            ..BridgeOptions::default()
+        };
+        let err = SerialBridge::start(Arc::clone(&e.client), e.info(8), tcp)
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("not a supported USB serial device"));
+    }
+}

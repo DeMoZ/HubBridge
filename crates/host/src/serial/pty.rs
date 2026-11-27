@@ -7,6 +7,9 @@
 //! the slave's termios and turns changes of speed, size, parity, stop bits and RTS/CTS into
 //! line changes on the port, before the data the application wrote after the change.
 
+// `tcflag_t` is u64 on macOS and u32 on Linux: the casts to u64 are needed on one of them.
+#![allow(clippy::unnecessary_cast)]
+
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +22,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use super::port::RxBuffer;
 use super::{Flow, Line, Parity, SerialPort, StopBits};
 
 const TIOCPKT_FLUSHREAD: u8 = 0x01;
@@ -150,7 +154,7 @@ impl PtyFront {
             opts,
             observe(&tcgetattr(&*slave)?),
         ));
-        let writer = tokio::spawn(master_writer(afd, slave, port));
+        let writer = tokio::spawn(master_writer(afd, slave, port.tap()));
         Ok(PtyFront {
             path,
             tasks: vec![reader, writer],
@@ -286,8 +290,7 @@ async fn master_reader(
 }
 
 /// Device → application.
-async fn master_writer(afd: Arc<AsyncFd<OwnedFd>>, _slave: Arc<OwnedFd>, port: SerialPort) {
-    let rx = port.rx();
+async fn master_writer(afd: Arc<AsyncFd<OwnedFd>>, _slave: Arc<OwnedFd>, rx: Arc<RxBuffer>) {
     while let Some(chunk) = rx.recv().await {
         if let Err(e) = write_master(&afd, &chunk).await {
             warn!("PTY write failed: {e}");

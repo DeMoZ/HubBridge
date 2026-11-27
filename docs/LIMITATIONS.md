@@ -125,12 +125,37 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 | Goal | Linux | Windows | macOS |
 |---|---|---|---|
 | Any USB device (USB/IP) | **In-box** `vhci-hcd` + `usbip` | **usbip-win2**: recent releases have attestation-signed drivers, no test mode. Our own kernel driver would need an EV certificate + Microsoft attestation signing. | **No client.** A user-space virtual host controller (`IOUSBHostControllerInterface`) needs the restricted entitlement `com.apple.developer.usb.host-controller-interface`, granted by Apple on request only. Kexts are deprecated and need Reduced Security on Apple Silicon. |
-| Serial (CDC/FTDI/CP210x/CH34x) | PTY, no driver | Virtual COM needs a signed driver (e.g. com0com) — or a TCP/RFC 2217 port without one | PTY (`/dev/ttysNNN`), no driver |
+| Serial (CDC/FTDI/CP210x/CH34x) | PTY (`/dev/pts/N`), no driver; also TCP / RFC 2217 | **No virtual COM port** (needs a signed driver such as com0com, not shipped): TCP / RFC 2217 (pyserial `rfc2217://`, esptool) works; for a COM port in other software use com0com + hub4com yourself | PTY (`/dev/ttysNNN`), no driver; also TCP / RFC 2217 |
 | Keyboard / mouse | uinput | `SendInput`, no driver | `CGEvent`, Accessibility permission |
 | Generic HID / gamepad | uhid | VHF (KMDF driver, signing) / ViGEm-style bus driver | HIDDriverKit dext: DriverKit entitlements from Apple + user approval in System Settings |
 | Virtual monitor | evdi / dummy plug | **IddCx** UMDF driver: test-signing for development, attestation signing for distribution; signed open-source options exist (Virtual Display Driver, Parsec VDD) | `CGVirtualDisplay` — **private API** (no App Store, may break with OS updates); no public alternative |
 | Screen capture | PipeWire | Windows.Graphics.Capture / Desktop Duplication, no driver | ScreenCaptureKit, Screen Recording permission |
 | Webcam from the phone | v4l2loopback | **Windows 11 `MFCreateVirtualCamera`**, no driver (Windows 10: DirectShow filter only) | CoreMediaIO **Camera Extension**: system extension, Developer ID + notarization, user approval |
+
+### Serial front ends: what a PTY can and cannot do
+
+- **PTY (macOS, Linux)**: `hubbridge serial <id>` prints the `/dev/...` path; any program that
+  opens it sees a raw terminal. Baud rate, data bits, parity, stop bits and RTS/CTS that the
+  program sets with `tcsetattr` are applied to the chip before the data it writes after the
+  change (the termios of the PTY is looked at every 100 ms and before every chunk it
+  writes). On macOS arbitrary rates (250000, 921600, 3000000) work through `tcsetattr`.
+  `tcflush` on the PTY purges the matching direction.
+- **What a PTY cannot do**: modem lines are not visible (`TIOCMGET` and `TIOCMSET` fail on a
+  PTY), so DTR/RTS toggling such as esptool's auto-reset does not work; and programs that set
+  rates above 230400 on macOS with `IOSSIOSPEED` (pyserial does) get `ENOTTY` on a PTY. Use
+  `--baud N --lock-line` (the bridge sets the rate, the program's settings are ignored), or
+  RFC 2217.
+- **RFC 2217 (`--tcp PORT --rfc2217`, all platforms)**: carries baud rate, line format,
+  RTS/CTS, DTR/RTS, break, purge and modem/line state notifications. Clients:
+  `pyserial` (`serial.serial_for_url("rfc2217://127.0.0.1:PORT")`), `esptool --port
+  rfc2217://127.0.0.1:PORT`. XON/XOFF is not supported (the flow in effect is reported).
+- **Raw TCP (`--tcp PORT`)**: bytes as they are, no line control (use `--baud`).
+- **Windows**: no PTY. RFC 2217 clients (pyserial, esptool) work directly; a COM port for
+  programs that need one takes com0com + hub4com (or similar), not shipped.
+- The TCP port listens on 127.0.0.1 only unless you give an address, and has no
+  authentication; one client at a time.
+- Bytes the device sends while no program has the PTY open wait in the pty queue (a few KB,
+  then they are dropped and counted) and are read by the next program that opens it.
 
 ## 5. Video latency budget (estimate, 1080p60, good 5 GHz Wi-Fi)
 

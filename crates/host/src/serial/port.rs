@@ -268,6 +268,8 @@ struct Inner {
     chip: Mutex<ChipState>,
     stats: AtomicStats,
     rx: Arc<RxBuffer>,
+    /// Independent receive buffers of front ends; when there are any, `rx` is not filled.
+    taps: Mutex<Vec<Arc<RxBuffer>>>,
     tx: Tx,
     modem: Mutex<ModemStatus>,
     demand: AtomicUsize,
@@ -344,6 +346,9 @@ impl Inner {
             }
         });
         self.rx.close();
+        for t in self.taps.lock().unwrap().iter() {
+            t.close();
+        }
         self.tx.st.lock().unwrap().closed = true;
         self.tx.changed.notify_waiters();
     }
@@ -376,12 +381,27 @@ impl Inner {
         let _ = self.events.send(PortEvent::LineError(e));
     }
 
+    /// Every receive buffer that is in use: the front ends' taps, else the base buffer.
+    fn sinks(&self) -> Vec<Arc<RxBuffer>> {
+        let mut taps = self.taps.lock().unwrap();
+        // A tap nobody holds any more is forgotten.
+        taps.retain(|t| Arc::strong_count(t) > 1);
+        if taps.is_empty() {
+            vec![Arc::clone(&self.rx)]
+        } else {
+            taps.clone()
+        }
+    }
+
     fn deliver(&self, data: Vec<u8>) {
         if data.is_empty() {
             return;
         }
         let n = data.len();
-        let dropped = self.rx.push(data);
+        let mut dropped = 0;
+        for sink in self.sinks() {
+            dropped = dropped.max(sink.push(data.clone()));
+        }
         self.stats.rx.fetch_add((n - dropped) as u64, Ordering::Relaxed);
         if dropped > 0 {
             self.stats.rx_dropped.fetch_add(dropped as u64, Ordering::Relaxed);
@@ -489,6 +509,7 @@ impl SerialPort {
                 }),
                 stats: AtomicStats::default(),
                 rx: Arc::new(RxBuffer::new()),
+                taps: Mutex::new(Vec::new()),
                 tx: Tx {
                     st: Mutex::new(TxState::default()),
                     changed: Notify::new(),
@@ -585,6 +606,17 @@ impl SerialPort {
     /// The bytes received from the device, for one consumer.
     pub fn rx(&self) -> Arc<RxBuffer> {
         Arc::clone(&self.inner.rx)
+    }
+
+    /// A receive buffer of its own for a front end: every received byte is copied to each
+    /// tap (the base buffer of [`SerialPort::rx`] gets nothing while taps exist).
+    pub fn tap(&self) -> Arc<RxBuffer> {
+        let t = Arc::new(RxBuffer::new());
+        if self.inner.is_done() {
+            t.close();
+        }
+        self.inner.taps.lock().unwrap().push(Arc::clone(&t));
+        t
     }
 
     /// A consumer wants modem status events: CP210x is polled while any consumer does.
@@ -698,6 +730,9 @@ impl SerialPort {
         let i = &self.inner;
         if rx {
             i.rx.clear();
+            for t in i.taps.lock().unwrap().iter() {
+                t.clear();
+            }
         }
         if tx {
             let mut g = i.tx.st.lock().unwrap();
