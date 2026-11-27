@@ -104,7 +104,7 @@ impl Store {
             .data
             .agents
             .iter()
-            .filter(|(id, a)| id.starts_with(&q) || a.name.to_lowercase() == q)
+            .filter(|(id, a)| id.starts_with(&q) || a.name.trim().to_lowercase() == q)
             .collect();
         match hits.len() {
             0 => Ok(None),

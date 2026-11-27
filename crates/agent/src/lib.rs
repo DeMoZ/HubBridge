@@ -164,7 +164,12 @@ fn save_state(path: &Path, st: &PersistState) -> anyhow::Result<()> {
 }
 
 impl Agent {
-    pub fn new(cfg: AgentConfig) -> anyhow::Result<Self> {
+    pub fn new(mut cfg: AgentConfig) -> anyhow::Result<Self> {
+        // Phone names can carry stray spaces (e.g. Samsung's " Galaxy S10e").
+        cfg.name = cfg.name.trim().to_string();
+        if cfg.name.is_empty() {
+            cfg.name = cfg.model.trim().to_string();
+        }
         let state_path = cfg.state_dir.join("agent-state.json");
         let state = load_or_create_state(&state_path)?;
         let (events, _) = broadcast::channel(256);
