@@ -1,14 +1,18 @@
 //! Serial ports end to end over real TCP: host serial core ↔ agent core ↔ fake serial chips.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::PausableProxy;
 use hubbridge_agent::fake::{FakeKind, FakeUsb, LineErrorKind, ModemLines, SerialChip, SerialEvent};
 use hubbridge_agent::{Agent, AgentConfig};
+use hubbridge_host::client::AgentError;
 use hubbridge_host::serial::{Flow, Line, Parity, PortEvent, PortOptions, SerialConfig, SerialPort, StopBits};
 use hubbridge_host::{Client, Store};
-use hubbridge_proto::{UsbDeviceInfo, fixtures};
+use hubbridge_proto::{ErrorCode, Message, UsbDeviceInfo, fixtures};
 
 const CP2102: u32 = 1;
 const FT232R: u32 = 2;
@@ -35,6 +39,8 @@ struct Env {
     freeze: Arc<std::sync::atomic::AtomicBool>,
     /// Where the agent listens (to start another session).
     addr: std::net::SocketAddr,
+    /// The host's key store (to connect another client).
+    store_path: PathBuf,
 }
 
 async fn env() -> Env {
@@ -161,6 +167,7 @@ async fn env_with(proxied: bool) -> Env {
         infos,
         freeze,
         addr,
+        store_path: store.path().to_path_buf(),
     }
 }
 
@@ -1977,4 +1984,102 @@ mod review {
         );
         assert!(reqs.contains(&(0x40, 0x01, 0x0100, 0)) && reqs.contains(&(0x40, 0x01, 0x0200, 0)));
     }
+}
+
+/// Closing a port while the host's socket is full: its close budgets run out and its tasks
+/// are aborted in the middle of requests. The session must survive (GitHub issue #7).
+#[tokio::test]
+async fn serial_close_budgets_keep_session() {
+    let e = env().await;
+    let proxy = PausableProxy::start(e.addr).await;
+    let mut store = Store::load(&e.store_path).unwrap();
+    let client = Arc::new(Client::connect(&[proxy.addr()], &mut store).await.unwrap());
+    let mut events = client.take_events().unwrap();
+    let port = Arc::new(
+        SerialPort::open(
+            Arc::clone(&client),
+            e.info(CP2102),
+            SerialConfig::default(),
+            PortOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
+
+    // Some data goes through first, then the agent side stops reading and the host's socket
+    // is filled with big requests for a device that is not open (kept, so their answers can
+    // be checked); the last one is dropped by its timeout.
+    port.write(&pattern(1000)).await.unwrap();
+    wait_tx(&port, 1000).await;
+    proxy.pause();
+    let mut fillers = Vec::new();
+    let mut expired = false;
+    for _ in 0..400 {
+        let msg = Message::Transfer {
+            id: 999,
+            endpoint: 0x01,
+            length: 0,
+            data: vec![0x5A; 64 * 1024],
+            timeout_ms: 1000,
+        };
+        match tokio::time::timeout(Duration::from_millis(200), client.submit(msg)).await {
+            Ok(p) => fillers.push(p.unwrap()),
+            Err(_) => {
+                expired = true;
+                break;
+            }
+        }
+    }
+    assert!(expired, "the socket never filled up");
+
+    // The port still has OUT data to send; closing it puts its control, release and close
+    // requests behind the full queue, so every budget runs out and its tasks are aborted.
+    let writer = {
+        let port = Arc::clone(&port);
+        tokio::spawn(async move {
+            for _ in 0..8 {
+                if port.write(&pattern(64 * 1024)).await.is_err() {
+                    return;
+                }
+            }
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let closing = tokio::time::timeout(Duration::from_secs(5), port.close()).await;
+    assert!(closing.is_ok(), "close must stay within its budgets");
+    writer.abort();
+    let _ = writer.await;
+    proxy.resume();
+
+    for p in fillers {
+        let e = p.wait(Duration::from_secs(60)).await.unwrap_err();
+        assert!(
+            matches!(e.downcast_ref::<AgentError>(), Some(a) if a.code == ErrorCode::NotOpen),
+            "{e:#}"
+        );
+    }
+    client.ping(1).await.unwrap();
+    assert!(client.list_devices().await.unwrap().iter().any(|d| d.id == CP2102));
+    // The device can be opened again on the same session, and a port opened after closing
+    // it echoes data.
+    client.open_device(CP2102).await.unwrap();
+    client.close_device(CP2102).await.unwrap();
+    let port = SerialPort::open(
+        Arc::clone(&client),
+        e.info(CP2102),
+        SerialConfig::default(),
+        PortOptions::default(),
+    )
+    .await
+    .unwrap();
+    port.write(b"hello after the storm").await.unwrap();
+    assert_eq!(read_exact(&port, 21).await, b"hello after the storm");
+    port.close().await;
+    assert!(
+        !matches!(
+            tokio::time::timeout(Duration::from_millis(500), events.recv()).await,
+            Ok(Some(hubbridge_host::ClientEvent::Disconnected(_)))
+        ),
+        "no Disconnected event expected"
+    );
 }
