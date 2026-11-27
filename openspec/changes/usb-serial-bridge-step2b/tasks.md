@@ -10,8 +10,8 @@ corrected in the same commit.
 
 ## 1. Descriptor fixtures (`crates/proto/src/fixtures.rs`)
 
-- [ ] 1.1 Add raw-descriptor fixtures and `UsbDeviceInfo` builders for FT232R, FT2232H (two interfaces), FT232H, CH340 (bulk + interrupt) exactly as listed in design decision 12; verify a new test in `crates/proto/src/descriptors.rs` parses each (VID/PID, bcdDevice, interface count, endpoint addresses, max packet sizes 64 / 512 / 32 / 8)
-- [ ] 1.2 Add the three CDC-ACM fixtures (simple 1209:0001 with IAD + header/call-management/ACM/union descriptors; composite with two vendor interfaces before IAD at 2, control 2, data 3; no-union with control 0 and data 1); verify the parser test sees the right interface classes (02/02 and 0a) and still skips the class-specific descriptors, and `cargo test -p hubbridge-proto` passes
+- [x] 1.1 Add raw-descriptor fixtures and `UsbDeviceInfo` builders for FT232R, FT2232H (two interfaces), FT232H, CH340 (bulk + interrupt) exactly as listed in design decision 12; verify a new test in `crates/proto/src/descriptors.rs` parses each (VID/PID, bcdDevice, interface count, endpoint addresses, max packet sizes 64 / 512 / 32 / 8)
+- [x] 1.2 Add the three CDC-ACM fixtures (simple 1209:0001 with IAD + header/call-management/ACM/union descriptors; composite with two vendor interfaces before IAD at 2, control 2, data 3; no-union with control 0 and data 1); verify the parser test sees the right interface classes (02/02 and 0a) and still skips the class-specific descriptors, and `cargo test -p hubbridge-proto` passes
 
 ## 2. Fake backend: generic fixes (`crates/agent/src/fake.rs`)
 
