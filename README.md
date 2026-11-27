@@ -50,7 +50,8 @@ cargo run -p hubbridge-desktop --release      # opens the HubBridge window
 - USB devices on the phone with configurations / interfaces / endpoints and **Ask phone**
   for USB permission.
 
-Uses the system WebView (tao + wry). adb is optional: needed only for the cable, installing
+Uses the system WebView (tao + wry; on Linux install `libwebkit2gtk-4.1-dev libgtk-3-dev`
+first). adb is optional: needed only for the cable, installing
 the app and ADB over Wi-Fi (`brew install android-platform-tools` on macOS).
 
 ## Try it without a phone
