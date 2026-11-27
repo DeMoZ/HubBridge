@@ -75,9 +75,9 @@ corrected in the same commit.
 
 ## 9. Integration gates
 
-- [ ] 9.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass on macOS; after push verify the Linux job (PTY code built, desktop excluded) and the Windows job (PTY code compiled out, TCP/RFC 2217 tests run) are green
-- [ ] 9.2 Confirm the protocol is untouched: `git diff main -- crates/proto/src/lib.rs crates/link docs/PROTOCOL.md` shows no change (fixtures only in `crates/proto/src/fixtures.rs`); verify `PROTO_VERSION` is still 1
-- [ ] 9.3 Re-run the Android checks after all agent changes: `cargo ndk -t arm64-v8a -P 26 clippy -p hubbridge-android -p hubbridge-agent -- -D warnings` and `cd android && ./gradlew assembleDebug` (`ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`, `JAVA_HOME=$(/usr/libexec/java_home -v 25)`); verify both succeed
+- [ ] 9.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass on macOS; after push verify the Linux job (PTY code built, desktop excluded) and the Windows job (PTY code compiled out, TCP/RFC 2217 tests run) are green **Status:** the local part passes on macOS (fmt check, clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`: 135 tests green); left unticked because the Linux and Windows CI jobs can only be checked after a push (not done here). Neither target can be compiled on this Mac (`ring` needs a C toolchain for them), so the Linux-only `libc`/`rustix` details of `serial/pty.rs` are unverified until CI.
+- [x] 9.2 Confirm the protocol is untouched: `git diff main -- crates/proto/src/lib.rs crates/link docs/PROTOCOL.md` shows no change (fixtures only in `crates/proto/src/fixtures.rs`); verify `PROTO_VERSION` is still 1
+- [x] 9.3 Re-run the Android checks after all agent changes: `cargo ndk -t arm64-v8a -P 26 clippy -p hubbridge-android -p hubbridge-agent -- -D warnings` and `cd android && ./gradlew assembleDebug` (`ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`, `JAVA_HOME=$(/usr/libexec/java_home -v 25)`); verify both succeed
 
 ## 10. Hardware check (needs Roman's phone and Chameleon Ultra)
 

@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
     let uart = fixtures::cp2102_uart(1002);
     let keyboard = fixtures::without_permission(fixtures::hid_keyboard(1003));
     let drive = fixtures::flash_drive(1004);
-    let extra = vec![
+    let extra = [
         fixtures::ft232r_uart(1005),
         fixtures::ft2232h_uart(1006),
         fixtures::ft232h_uart(1007),
