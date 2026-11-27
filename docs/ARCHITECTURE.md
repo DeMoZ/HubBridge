@@ -135,7 +135,8 @@ HubBridge/
 │   ├── agent/                 agent core: server, pairing window, sessions, device registry
 │   ├── android/               JNI cdylib libhubbridge_android.so (built with cargo-ndk)
 │   ├── agent-sim/             desktop agent with fake devices (CP2102 UART, HID keyboard)
-│   └── host/                  desktop library + `hubbridge` CLI, e2e tests
+│   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
+│   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)
 │   └── app/src/main/kotlin/com/demoz/hubbridge/
 │       ├── MainActivity.kt    UI
@@ -149,5 +150,5 @@ HubBridge/
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`
 (USB/IP codec + localhost server, step 2), `crates/video` (framing, pacing, stats, step 3),
-`crates/desktop` (tray app, step 4), `os/windows/idd` and `os/macos/` (driver/extension
+`os/windows/idd` and `os/macos/` (driver/extension
 projects, step 3).
