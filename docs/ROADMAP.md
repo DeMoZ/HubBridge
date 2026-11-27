@@ -48,6 +48,21 @@ adapter with its endpoints over Wi-Fi and over `adb forward`; unplugging it show
    hub's HDMI output.
 4. Measure glass-to-glass latency with a flashing test pattern + phone camera.
 
+## Desktop window (pulled forward from step 4) ✅
+
+- [x] `crates/desktop` (binary `HubBridge`, tao + wry): agents on the LAN, pairing with the
+      PIN, connect by agent / IP / adb, live status and RTT graph, auto-connect and reconnect,
+      USB devices with details and "Ask phone".
+- [x] adb panel based on UniversalKM's approach: adb found in PATH and common install dirs,
+      transports grouped per phone by `ro.serialno`, Install/Reinstall app, Connect via ADB,
+      ADB over Wi-Fi (`tcpip 5555` + `connect`, saved and reconnected every ~6 s, "plug the
+      cable once" after a phone restart), wireless-debugging pairing by code.
+- [ ] Tray icon, launch at login, `.app` / installer packaging (macOS needs
+      `NSLocalNetworkUsageDescription` + `NSBonjourServices = _hubbridge._tcp` in Info.plist,
+      and the adb server should be spawned "disclaimed" so it keeps network access after the
+      app quits — see UniversalKM `DisclaimedSpawn.swift`).
+- [ ] More languages than en/ru; settings page.
+
 ## Step 4 — Reliability and UX
 
 - Reconnect with exponential backoff and session resumption of open devices; buffering and

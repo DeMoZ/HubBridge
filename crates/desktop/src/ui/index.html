@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HubBridge</title>
+<style>
+:root {
+  --bg: #07080d;
+  --glass: rgba(255,255,255,0.045);
+  --glass-2: rgba(255,255,255,0.075);
+  --glass-hi: rgba(255,255,255,0.11);
+  --line: rgba(255,255,255,0.08);
+  --line-2: rgba(255,255,255,0.14);
+  --text: #eef0f7;
+  --text-2: #a4a9bd;
+  --text-3: #6b7088;
+  --teal: #4fe3c1;
+  --indigo: #8b8cff;
+  --pink: #ff6fb5;
+  --amber: #ffbe5c;
+  --red: #ff5f6d;
+  --green: #3ee08f;
+  --grad: linear-gradient(120deg, #4fe3c1 0%, #8b8cff 55%, #ff6fb5 100%);
+  --shadow: 0 20px 60px -20px rgba(0,0,0,0.6);
+  --radius: 20px;
+  --radius-s: 12px;
+  --blob-a: rgba(79,227,193,0.18);
+  --blob-b: rgba(139,140,255,0.20);
+  --blob-c: rgba(255,111,181,0.12);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f3f4fa;
+    --glass: rgba(255,255,255,0.62);
+    --glass-2: rgba(255,255,255,0.82);
+    --glass-hi: rgba(255,255,255,0.95);
+    --line: rgba(20,22,40,0.08);
+    --line-2: rgba(20,22,40,0.14);
+    --text: #12131c;
+    --text-2: #4b5068;
+    --text-3: #8a8fa5;
+    --teal: #0fb894;
+    --indigo: #5b5cf0;
+    --pink: #e2408f;
+    --amber: #d98a12;
+    --red: #e23c4c;
+    --green: #16a865;
+    --shadow: 0 20px 50px -24px rgba(30,30,80,0.25);
+    --blob-a: rgba(79,227,193,0.28);
+    --blob-b: rgba(139,140,255,0.26);
+    --blob-c: rgba(255,111,181,0.16);
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+button, input { font: inherit; color: inherit; }
+.mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+.num { font-variant-numeric: tabular-nums; }
+.sel { user-select: text; -webkit-user-select: text; }
+
+.aurora { position: fixed; inset: -20%; z-index: 0; pointer-events: none; filter: blur(60px); }
+.aurora i { position: absolute; border-radius: 50%; animation: drift 28s ease-in-out infinite alternate; }
+.aurora i:nth-child(1) { width: 46vw; height: 46vw; left: 4%; top: 0; background: var(--blob-a); }
+.aurora i:nth-child(2) { width: 50vw; height: 50vw; right: 0; top: 20%; background: var(--blob-b); animation-duration: 34s; }
+.aurora i:nth-child(3) { width: 36vw; height: 36vw; left: 36%; bottom: -8%; background: var(--blob-c); animation-duration: 40s; }
+@keyframes drift { to { transform: translate(4vw, -3vh) scale(1.08); } }
+
+.app { position: relative; z-index: 1; height: 100%; display: grid; grid-template-rows: 56px 1fr; }
+.top { display: flex; align-items: center; gap: 12px; padding: 0 20px; }
+.platform-macos .top { padding-left: 86px; }
+.logo { width: 26px; height: 26px; border-radius: 8px; background: var(--grad); display: grid; place-items: center; box-shadow: 0 6px 18px -6px rgba(139,140,255,0.8); }
+.logo svg { width: 16px; height: 16px; }
+.brand { font-weight: 650; letter-spacing: .2px; }
+.ver { color: var(--text-3); font-size: 12px; }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--glass); border: 1px solid var(--line); font-size: 12.5px; color: var(--text-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+.dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(62,224,143,0.15); }
+.dot.wait { background: var(--amber); animation: pulse 1.2s ease-in-out infinite; }
+.dot.err { background: var(--red); }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.main { display: grid; grid-template-columns: 350px 1fr; gap: 16px; padding: 4px 20px 20px; min-height: 0; }
+.col { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding-bottom: 8px; }
+.col::-webkit-scrollbar { width: 8px; } .col::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 8px; }
+
+.panel { background: var(--glass); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); box-shadow: var(--shadow); }
+.ph { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ph h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .6px; text-transform: uppercase; color: var(--text-2); }
+.ph .count { color: var(--text-3); font-size: 12px; }
+.ph .spacer { flex: 1; }
+
+.card { background: var(--glass-2); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.card + .card { margin-top: 8px; }
+.card.active { border-color: color-mix(in srgb, var(--indigo) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--indigo) 18%, transparent); }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.name { font-weight: 600; }
+.sub { color: var(--text-3); font-size: 12.5px; }
+.muted { color: var(--text-2); }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--line-2); color: var(--text-2); white-space: nowrap; }
+.chip.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.chip.warn { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
+.chip.err { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+.chip.info { color: var(--indigo); border-color: color-mix(in srgb, var(--indigo) 40%, transparent); }
+
+.btn { border: 1px solid var(--line-2); background: var(--glass-hi); padding: 6px 12px; border-radius: 10px; cursor: pointer; font-size: 13px; font-weight: 550; transition: transform .08s, background .15s; white-space: nowrap; }
+.btn:hover { background: color-mix(in srgb, var(--glass-hi) 70%, var(--indigo) 12%); }
+.btn:active { transform: scale(.97); }
+.btn[disabled] { opacity: .45; cursor: default; transform: none; }
+.btn.primary { background: var(--grad); color: #0b0c14; border-color: transparent; }
+.btn.ghost { background: transparent; }
+.btn.danger { color: var(--red); }
+.btn.small { padding: 4px 9px; font-size: 12px; border-radius: 8px; }
+.btn .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+
+input.field { width: 100%; background: var(--glass-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 7px 10px; outline: none; user-select: text; -webkit-user-select: text; }
+input.field:focus { border-color: var(--indigo); box-shadow: 0 0 0 3px color-mix(in srgb, var(--indigo) 22%, transparent); }
+.inline { display: flex; gap: 8px; }
+.inline .field { flex: 1; min-width: 0; }
+details summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; list-style: none; }
+details summary::before { content: "▸ "; }
+details[open] summary::before { content: "▾ "; }
+.form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.note { font-size: 12.5px; color: var(--text-2); background: var(--glass-2); border: 1px dashed var(--line-2); border-radius: var(--radius-s); padding: 10px 12px; }
+.note b { color: var(--text); }
+.note code, .sub code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--glass-hi); padding: 1px 5px; border-radius: 5px; }
+
+/* connection hero */
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; }
+.hero h1 { margin: 0 0 4px; font-size: 26px; font-weight: 700; letter-spacing: -.3px; }
+.hero .facts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.rtt { text-align: right; min-width: 260px; }
+.rtt .big { font-size: 34px; font-weight: 700; letter-spacing: -.5px; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.rtt .big small { font-size: 15px; font-weight: 600; }
+.rtt svg { width: 260px; height: 54px; display: block; margin-top: 4px; }
+.rtt .stats { font-size: 12px; color: var(--text-3); }
+.empty { text-align: center; padding: 28px 10px; color: var(--text-2); }
+.empty h1 { font-size: 22px; margin: 6px 0 8px; color: var(--text); }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; text-align: left; }
+.step { background: var(--glass-2); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px; font-size: 12.5px; }
+.step b { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text); }
+.step i { font-style: normal; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--grad); color: #0b0c14; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
+.err-line { color: var(--red); font-size: 12.5px; margin-top: 8px; }
+
+/* devices */
+.devgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
+.dev { background: var(--glass-2); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.dev.dim { opacity: .62; }
+.dev .head { display: flex; gap: 10px; align-items: flex-start; }
+.ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--glass-hi); border: 1px solid var(--line); flex: none; color: var(--indigo); }
+.ico svg { width: 18px; height: 18px; }
+.dev .title { font-weight: 600; line-height: 1.25; }
+.tree { font-size: 12px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.tree .l2 { padding-left: 12px; } .tree .l3 { padding-left: 24px; color: var(--text-3); }
+
+.toasts { position: fixed; right: 20px; bottom: 20px; z-index: 20; display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
+.toast { background: var(--glass-hi); border: 1px solid var(--line-2); border-left: 3px solid var(--green); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); font-size: 13px; animation: in .2s ease-out; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); user-select: text; -webkit-user-select: text; white-space: pre-wrap; }
+.toast.err { border-left-color: var(--red); }
+@keyframes in { from { opacity: 0; transform: translateY(8px); } }
+
+.modal { position: fixed; inset: 0; z-index: 30; display: none; place-items: center; background: rgba(0,0,0,0.35); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.modal.open { display: grid; }
+.sheet { width: 400px; background: var(--glass-hi); border: 1px solid var(--line-2); border-radius: 22px; padding: 22px; box-shadow: var(--shadow); }
+.sheet h3 { margin: 0 0 6px; font-size: 18px; }
+.pin { font: 600 30px/1 ui-monospace, Menlo, monospace; letter-spacing: 12px; text-align: center; padding: 12px; }
+.sheet .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="aurora"><i></i><i></i><i></i></div>
+<div class="app">
+  <header class="top" id="top">
+    <div class="logo"><svg viewBox="0 0 16 16" fill="none" stroke="#0b0c14" stroke-width="1.8" stroke-linecap="round"><path d="M8 2v8M5 7l3 3 3-3M3 13h10"/></svg></div>
+    <span class="brand">HubBridge</span><span class="ver" id="ver"></span>
+    <span class="spacer"></span>
+    <span class="pill" id="status"><span class="dot"></span><span></span></span>
+  </header>
+  <div class="main">
+    <div class="col">
+      <section class="panel">
+        <div class="ph"><h2 data-t="network"></h2><span class="count" id="agentsCount"></span></div>
+        <div id="agents"></div>
+        <details style="margin-top:12px">
+          <summary data-t="byAddress"></summary>
+          <div class="form">
+            <div class="inline"><input class="field mono" id="addr" placeholder="192.168.1.20" spellcheck="false"><button class="btn" id="addrGo" data-t="connect"></button></div>
+          </div>
+        </details>
+      </section>
+      <section class="panel">
+        <div class="ph"><h2 data-t="adb"></h2><span class="count" id="phonesCount"></span></div>
+        <div id="phones"></div>
+        <details style="margin-top:12px">
+          <summary data-t="wireless"></summary>
+          <div class="form">
+            <div class="sub" data-t="wirelessHelp"></div>
+            <div class="inline"><input class="field mono" id="wpAddr" placeholder="192.168.1.20:41234" spellcheck="false"><input class="field mono" id="wpCode" placeholder="123456" style="max-width:96px" spellcheck="false"></div>
+            <button class="btn" id="wpGo" data-t="pairCode"></button>
+            <div class="inline"><input class="field mono" id="wcAddr" placeholder="192.168.1.20:5555" spellcheck="false"><button class="btn" id="wcGo" data-t="adbConnect"></button></div>
+          </div>
+        </details>
+      </section>
+    </div>
+    <div class="col">
+      <section class="panel" id="conn"></section>
+      <section class="panel">
+        <div class="ph"><h2 data-t="usb"></h2><span class="count" id="devCount"></span></div>
+        <div id="devices"></div>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+<div class="modal" id="pairModal">
+  <div class="sheet">
+    <h3 data-t="pairTitle"></h3>
+    <div class="sub" id="pairWho"></div>
+    <div class="sub" style="margin-top:8px" data-t="pairHelp"></div>
+    <input class="field pin" id="pin" maxlength="6" inputmode="numeric" autocomplete="off" placeholder="••••••">
+    <div class="actions"><button class="btn ghost" id="pairCancel" data-t="cancel"></button><button class="btn primary" id="pairGo" data-t="pair"></button></div>
+  </div>
+</div>
+<script>
+"use strict";
+const PLATFORM = "/*PLATFORM*/";
+document.body.classList.add("platform-" + PLATFORM);
+
+const I18N = {
+  en: {
+    network: "On this network", byAddress: "Connect by IP address", connect: "Connect", adb: "USB and ADB",
+    wireless: "Wireless debugging (Android 11+)",
+    wirelessHelp: "Phone: Developer options → Wireless debugging → Pair device with pairing code. Enter the IP:port and code it shows.",
+    pairCode: "Pair with code", adbConnect: "adb connect", usb: "USB devices on the phone",
+    pairTitle: "Pair with the phone", pairHelp: "On the phone: HubBridge → Start → Pair a new computer. Enter the 6-digit PIN.",
+    cancel: "Cancel", pair: "Pair", disconnect: "Disconnect", forget: "Forget", online: "online", offline: "offline",
+    paired: "paired", newAgent: "not paired", noAgents: "No phones found yet. Start HubBridge on the phone (same Wi-Fi).",
+    noAdb: "adb is not installed: {hint}. Needed only for the cable, installing the app and ADB over Wi-Fi.",
+    noPhones: "No phones over adb. Connect one by USB with USB debugging on, or use wireless debugging below.",
+    installApp: "Install app", updateApp: "Reinstall app", notInstalled: "HubBridge not installed",
+    viaAdb: "Connect via ADB", wifiOn: "ADB over Wi-Fi", wifiOff: "Turn off Wi-Fi ADB",
+    wifiRefused: "Phone restarted: plug the cable once and turn ADB over Wi-Fi on again.",
+    usbT: "USB", wifiT: "Wi-Fi",
+    idleTitle: "Connect a phone", idleText: "Pick a phone on the left, or follow the steps.",
+    s1: "Install", s1t: "Plug the phone in by USB (debugging on) and press Install app.",
+    s2: "Start", s2t: "On the phone: HubBridge → Start: Wi-Fi/LAN + ADB → Pair a new computer.",
+    s3: "Pair", s3t: "Press Pair next to the phone here and type the PIN it shows.",
+    connecting: "Connecting to {t}…", reconnecting: "Reconnecting to {t}…", connected: "Connected",
+    needsPair: "{t} needs pairing", needsPairText: "This computer is not paired with the phone (or the phone forgot it).",
+    idle: "Not connected", via_wifi: "Wi-Fi", via_adb: "ADB", ms: "ms", rttLabel: "round trip",
+    noDevices: "No USB devices on the phone. Plug a hub or a device into it.", notConnected: "Connect to a phone to see its USB devices.",
+    granted: "permission granted", noPerm: "no permission", ask: "Ask phone", details: "Details", hubInfo: "hub info, not forwardable",
+    cfg: "config", intf: "interface", ep: "endpoint", since: "since", appV: "app {v}",
+  },
+  ru: {
+    network: "В этой сети", byAddress: "Подключиться по IP-адресу", connect: "Подключить", adb: "USB и ADB",
+    wireless: "Беспроводная отладка (Android 11+)",
+    wirelessHelp: "Телефон: Параметры разработчика → Отладка по Wi-Fi → Подключить с кодом. Введите показанные IP:порт и код.",
+    pairCode: "Сопрячь по коду", adbConnect: "adb connect", usb: "USB-устройства телефона",
+    pairTitle: "Сопряжение с телефоном", pairHelp: "На телефоне: HubBridge → Start → Pair a new computer. Введите 6-значный PIN.",
+    cancel: "Отмена", pair: "Сопрячь", disconnect: "Отключить", forget: "Забыть", online: "в сети", offline: "не в сети",
+    paired: "сопряжён", newAgent: "не сопряжён", noAgents: "Телефоны пока не найдены. Запустите HubBridge на телефоне (та же Wi-Fi сеть).",
+    noAdb: "adb не установлен: {hint}. Он нужен только для кабеля, установки приложения и ADB по Wi-Fi.",
+    noPhones: "Нет телефонов по adb. Подключите телефон по USB с включённой отладкой или используйте беспроводную отладку ниже.",
+    installApp: "Установить приложение", updateApp: "Переустановить", notInstalled: "HubBridge не установлен",
+    viaAdb: "Подключить через ADB", wifiOn: "ADB по Wi-Fi", wifiOff: "Выключить ADB по Wi-Fi",
+    wifiRefused: "Телефон перезагружался: один раз подключите кабель и снова включите ADB по Wi-Fi.",
+    usbT: "USB", wifiT: "Wi-Fi",
+    idleTitle: "Подключите телефон", idleText: "Выберите телефон слева или пройдите шаги.",
+    s1: "Установка", s1t: "Подключите телефон по USB (отладка включена) и нажмите «Установить приложение».",
+    s2: "Запуск", s2t: "На телефоне: HubBridge → Start: Wi-Fi/LAN + ADB → Pair a new computer.",
+    s3: "Сопряжение", s3t: "Нажмите «Сопрячь» у телефона здесь и введите показанный PIN.",
+    connecting: "Подключение к {t}…", reconnecting: "Переподключение к {t}…", connected: "Подключено",
+    needsPair: "{t}: нужно сопряжение", needsPairText: "Этот компьютер не сопряжён с телефоном (или телефон его забыл).",
+    idle: "Не подключено", via_wifi: "Wi-Fi", via_adb: "ADB", ms: "мс", rttLabel: "туда-обратно",
+    noDevices: "К телефону не подключено USB-устройств. Подключите хаб или устройство.", notConnected: "Подключитесь к телефону, чтобы увидеть его USB-устройства.",
+    granted: "разрешение есть", noPerm: "нет разрешения", ask: "Спросить телефон", details: "Подробно", hubInfo: "сведения хаба, не пробрасывается",
+    cfg: "конфигурация", intf: "интерфейс", ep: "endpoint", since: "с", appV: "приложение {v}",
+  },
+};
+const LANG = (navigator.language || "en").toLowerCase().startsWith("ru") ? "ru" : "en";
+function t(key, args) {
+  let s = (I18N[LANG][key] ?? I18N.en[key] ?? key);
+  if (args) for (const [k, v] of Object.entries(args)) s = s.replaceAll("{" + k + "}", v);
+  return s;
+}
+for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+
+// Not named `ipc`: wry owns the non-configurable global `window.ipc`, and a top-level
+// `const ipc` would make WebKit reject the whole script.
+const send = (o) => window.ipc.postMessage(JSON.stringify(o));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const hex4 = (n) => n.toString(16).padStart(4, "0");
+const $ = (id) => document.getElementById(id);
+
+let M = null;
+const expanded = new Set();
+const rendered = {};
+function put(id, html) { if (rendered[id] !== html) { rendered[id] = html; $(id).innerHTML = html; } }
+
+const CLASS = { 0: "per-interface", 1: "Audio", 2: "CDC", 3: "HID", 5: "Physical", 6: "Image", 7: "Printer", 8: "Mass Storage", 9: "Hub", 10: "CDC Data", 11: "Smart Card", 14: "Video", 16: "Audio/Video", 17: "Billboard", 224: "Wireless", 239: "Misc", 254: "App Specific", 255: "Vendor" };
+const className = (c) => CLASS[c] ?? ("0x" + c.toString(16));
+const ICONS = {
+  storage: '<path d="M4 3h10l2 4v10H4z M4 7h12 M7 12h2"/>',
+  hid: '<rect x="2" y="6" width="16" height="9" rx="2"/><path d="M5 9h1M8 9h1M11 9h1M14 9h1M6 12h8"/>',
+  serial: '<path d="M3 10h4l2-4 2 8 2-4h4"/>',
+  video: '<rect x="2" y="5" width="11" height="10" rx="2"/><path d="M13 9l5-3v8l-5-3"/>',
+  audio: '<path d="M4 8v4h3l4 3V5L7 8z M14 7c1.5 1.5 1.5 4.5 0 6"/>',
+  hub: '<circle cx="10" cy="10" r="2"/><path d="M10 3v5M10 12v5M3 10h5M12 10h5"/>',
+  info: '<circle cx="10" cy="10" r="7"/><path d="M10 9v5M10 6.5v.5"/>',
+  usb: '<path d="M10 2v12M7 5l3-3 3 3M6 9v2l4 3M14 8v2l-4 3"/><circle cx="10" cy="16" r="2"/>',
+};
+function devKind(d) {
+  const classes = [d.class, ...d.configurations.flatMap((c) => c.interfaces.map((i) => i.class))];
+  if (classes.includes(8)) return "storage";
+  if (classes.includes(3)) return "hid";
+  if (classes.includes(14)) return "video";
+  if (classes.includes(1)) return "audio";
+  if (classes.includes(9)) return "hub";
+  if (classes.includes(17)) return "info";
+  if (classes.includes(2) || classes.includes(10) || [0x10c4, 0x0403, 0x1a86, 0x067b].includes(d.vendor_id)) return "serial";
+  return "usb";
+}
+const icon = (k) => `<div class="ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg></div>`;
+function btn(label, attrs, cls = "", busy = false) {
+  return `<button class="btn ${cls}" ${attrs} ${busy ? "disabled" : ""}>${busy ? '<span class="spin"></span>' : ""}${esc(label)}</button>`;
+}
+const data = (o) => Object.entries(o).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ");
+
+function renderStatus() {
+  const c = M.conn; const el = $("status");
+  let cls = "", text = t("idle");
+  if (c.state === "connected") { cls = "ok"; text = `${t("connected")} · ${esc(c.name)} · ${t("via_" + c.via)}`; }
+  else if (c.state === "connecting" || c.state === "reconnecting") { cls = "wait"; text = t(c.state, { t: esc(c.target_label) }); }
+  else if (c.state === "needs_pair") { cls = "err"; text = t("needsPair", { t: esc(c.target_label) }); }
+  put("status", `<span class="dot ${cls}"></span><span>${text}</span>`);
+}
+
+function renderAgents() {
+  $("agentsCount").textContent = M.agents.length ? String(M.agents.length) : "";
+  if (!M.agents.length) return put("agents", `<div class="note">${t("noAgents")}</div>`);
+  const cur = M.conn.agent_id;
+  put("agents", M.agents.map((a) => {
+    const active = cur === a.agent_id && M.conn.state === "connected";
+    const target = data({ act: "connect", kind: "agent", value: a.agent_id });
+    const actions = [];
+    if (a.paired && !active) actions.push(btn(t("connect"), target, "small primary", M.conn.state === "connecting" && M.conn.target?.value === a.agent_id));
+    if (active) actions.push(btn(t("disconnect"), data({ act: "disconnect" }), "small"));
+    if (a.online) actions.push(btn(t("pair"), data({ act: "pair", kind: "agent", value: a.agent_id, who: a.name }), "small" + (a.paired ? " ghost" : " primary"), M.busy.includes("pair")));
+    if (a.paired) actions.push(btn(t("forget"), data({ act: "forget", id: a.agent_id }), "small ghost danger"));
+    return `<div class="card ${active ? "active" : ""}">
+      <div class="row"><span class="name">${esc(a.name)}</span>
+        <span class="chip ${a.online ? "ok" : ""}">${t(a.online ? "online" : "offline")}</span>
+        <span class="chip ${a.paired ? "info" : "warn"}">${t(a.paired ? "paired" : "newAgent")}</span></div>
+      <div class="sub mono sel">${esc(a.addrs[0] ?? "—")}</div>
+      <div class="row">${actions.join("")}</div></div>`;
+  }).join(""));
+}
+
+function renderPhones() {
+  const a = M.adb;
+  $("phonesCount").textContent = a.phones.length ? String(a.phones.length) : "";
+  if (!a.found) return put("phones", `<div class="note">${t("noAdb", { hint: esc(a.hint).replace(/`([^`]+)`/g, "<code>$1</code>") })}</div>`);
+  if (a.error) return put("phones", `<div class="note">${esc(a.error)}</div>`);
+  if (!a.phones.length) return put("phones", `<div class="note">${t("noPhones")}</div>`);
+  put("phones", a.phones.map((p) => {
+    const ready = p.transports.filter((x) => x.state === "device");
+    const usb = ready.find((x) => !x.network);
+    const any = usb || ready[0];
+    const chips = p.transports.map((x) => {
+      const cls = x.state === "device" ? "ok" : "warn";
+      return `<span class="chip ${cls}" title="${esc(x.serial)}">${t(x.network ? "wifiT" : "usbT")}${x.state === "device" ? "" : " · " + esc(x.state)}</span>`;
+    }).join("");
+    const hints = p.transports.filter((x) => x.hint).map((x) => `<div class="sub">${esc(x.hint)}</div>`).join("");
+    const acts = [];
+    if (any) {
+      acts.push(btn(p.app_version ? t("updateApp") : t("installApp"), data({ act: "install", serial: any.serial }), "small" + (p.app_version ? "" : " primary"), M.busy.includes("install:" + any.serial)));
+      if (p.app_version) acts.push(btn(t("viaAdb"), data({ act: "connect", kind: "adb", value: any.serial }), "small"));
+    }
+    if (usb && !p.transports.some((x) => x.network && x.state === "device")) acts.push(btn(t("wifiOn"), data({ act: "adbwifi", serial: usb.serial }), "small", M.busy.includes("wifi:" + usb.serial)));
+    if (p.wifi_addr) acts.push(btn(t("wifiOff"), data({ act: "adbwifioff", key: p.key }), "small ghost"));
+    return `<div class="card">
+      <div class="row"><span class="name">${esc(p.model ?? p.key)}</span>${chips}</div>
+      <div class="sub">${p.app_version ? t("appV", { v: esc(p.app_version) }) : t("notInstalled")}${p.wifi_addr ? ` · <span class="mono sel">${esc(p.wifi_addr)}</span>` : ""}</div>
+      ${hints}${p.wifi_refused ? `<div class="sub" style="color:var(--amber)">${t("wifiRefused")}</div>` : ""}
+      <div class="row">${acts.join("")}</div></div>`;
+  }).join(""));
+}
+
+function spark(rtt) {
+  if (rtt.length < 2) return `<svg viewBox="0 0 260 54"></svg>`;
+  const max = Math.max(...rtt) * 1.15, min = 0;
+  const pts = rtt.map((v, i) => `${(i / (rtt.length - 1)) * 260},${54 - ((v - min) / (max - min || 1)) * 50 - 2}`);
+  return `<svg viewBox="0 0 260 54" preserveAspectRatio="none"><defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#4fe3c1"/><stop offset=".55" stop-color="#8b8cff"/><stop offset="1" stop-color="#ff6fb5"/></linearGradient></defs>
+    <polyline points="${pts.join(" ")}" fill="none" stroke="url(#g)" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function renderConn() {
+  const c = M.conn;
+  if (c.state === "connected") {
+    const i = c.info || {};
+    const r = c.rtt; const last = r.length ? r[r.length - 1] : null;
+    const avg = r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0;
+    const stats = r.length ? `min ${Math.min(...r).toFixed(1)} · avg ${avg.toFixed(1)} · max ${Math.max(...r).toFixed(1)} ${t("ms")}` : "";
+    return put("conn", `<div class="hero"><div>
+        <h1 class="sel">${esc(c.name)}</h1>
+        <div class="muted sel">${esc(i.model ?? "")}${i.os ? " · " + esc(i.os) : ""}${i.app_version ? " · " + t("appV", { v: esc(i.app_version) }) : ""}</div>
+        <div class="facts"><span class="chip ok">${t("via_" + c.via)}</span><span class="chip mono sel">${esc(c.addr)}</span>
+          ${i.usb_host === false ? '<span class="chip err">no USB host</span>' : ""}</div>
+        <div class="row" style="margin-top:14px">${btn(t("disconnect"), data({ act: "disconnect" }), "small")}</div>
+      </div>
+      <div class="rtt"><div class="big num">${last == null ? "—" : last.toFixed(1)} <small>${t("ms")}</small></div>
+        <div class="stats">${t("rttLabel")}</div>${spark(r)}<div class="stats num">${stats}</div></div></div>`);
+  }
+  if (c.state === "connecting" || c.state === "reconnecting") {
+    return put("conn", `<div class="empty"><h1>${t(c.state, { t: esc(c.target_label) })}</h1>
+      ${c.error ? `<div class="err-line sel">${esc(c.error)}</div>` : ""}
+      <div class="row" style="justify-content:center;margin-top:12px">${btn(t("cancel"), data({ act: "disconnect" }), "small")}</div></div>`);
+  }
+  if (c.state === "needs_pair") {
+    const tg = c.target || {};
+    return put("conn", `<div class="empty"><h1>${t("needsPair", { t: esc(c.target_label) })}</h1><div>${t("needsPairText")}</div>
+      ${c.error ? `<div class="err-line sel">${esc(c.error)}</div>` : ""}
+      <div class="row" style="justify-content:center;margin-top:14px">${btn(t("pair"), data({ act: "pair", kind: tg.kind, value: tg.value, who: c.target_label }), "primary")}</div></div>`);
+  }
+  put("conn", `<div class="empty"><h1>${t("idleTitle")}</h1><div>${t("idleText")}</div>
+    <div class="steps"><div class="step"><i>1</i><b>${t("s1")}</b>${t("s1t")}</div><div class="step"><i>2</i><b>${t("s2")}</b>${t("s2t")}</div><div class="step"><i>3</i><b>${t("s3")}</b>${t("s3t")}</div></div></div>`);
+}
+
+function renderDevices() {
+  const list = M.devices;
+  $("devCount").textContent = list.length ? String(list.length) : "";
+  if (M.conn.state !== "connected") return put("devices", `<div class="note">${t("notConnected")}</div>`);
+  if (!list.length) return put("devices", `<div class="note">${t("noDevices")}</div>`);
+  // Real devices first, the hub's own Billboard descriptors last.
+  const sorted = [...list].sort((a, b) => (devKind(a) === "info") - (devKind(b) === "info") || a.id - b.id);
+  put("devices", `<div class="devgrid">${sorted.map((d) => {
+    const kind = devKind(d);
+    const billboard = kind === "info";
+    const intfClasses = [...new Set(d.configurations.flatMap((c) => c.interfaces.map((i) => className(i.class))))];
+    const chips = [
+      `<span class="chip mono sel">${hex4(d.vendor_id)}:${hex4(d.product_id)}</span>`,
+      ...intfClasses.map((n) => `<span class="chip">${esc(n)}</span>`),
+      d.bcd_usb ? `<span class="chip">USB ${(d.bcd_usb >> 8)}.${(d.bcd_usb & 0xff).toString(16).padStart(2, "0")}</span>` : "",
+      billboard ? `<span class="chip">${t("hubInfo")}</span>` : `<span class="chip ${d.has_permission ? "ok" : "warn"}">${t(d.has_permission ? "granted" : "noPerm")}</span>`,
+    ].join("");
+    const open = expanded.has(d.id);
+    const tree = open ? `<div class="tree mono sel">${d.configurations.map((c) =>
+      `<div>${t("cfg")} ${c.value}${c.name ? ` "${esc(c.name)}"` : ""} · ${c.max_power_ma} mA · 0x${c.attributes.toString(16)}</div>` +
+      c.interfaces.map((i) => `<div class="l2">${t("intf")} ${i.number}.${i.alternate} ${esc(className(i.class))} ${i.class.toString(16)}/${i.subclass.toString(16)}/${i.protocol.toString(16)}${i.name ? ` "${esc(i.name)}"` : ""}</div>` +
+        i.endpoints.map((e) => `<div class="l3">${t("ep")} 0x${e.address.toString(16).padStart(2, "0")} ${e.address & 0x80 ? "IN " : "OUT"} ${["control", "iso", "bulk", "interrupt"][e.attributes & 3]} ${e.max_packet_size} B${(e.attributes & 3) === 3 ? " /" + e.interval : ""}</div>`).join("")).join("")).join("")}
+      <div class="l3">${esc(d.path)}${d.serial ? " · S/N " + esc(d.serial) : ""}</div></div>` : "";
+    return `<div class="dev ${billboard ? "dim" : ""}"><div class="head">${icon(kind)}<div style="min-width:0">
+        <div class="title sel">${esc(d.product ?? "USB device")}</div><div class="sub sel">${esc(d.manufacturer ?? "")}</div></div></div>
+      <div class="row">${chips}</div>
+      <div class="row">${!d.has_permission && !billboard ? btn(t("ask"), data({ act: "grant", id: d.id }), "small primary") : ""}${btn(t("details"), data({ act: "toggle", id: d.id }), "small ghost")}</div>${tree}</div>`;
+  }).join("")}</div>`);
+}
+
+function render() {
+  if (!M) return;
+  $("ver").textContent = "v" + M.version;
+  renderStatus(); renderAgents(); renderPhones(); renderConn(); renderDevices();
+}
+
+window.onState = (m) => { M = m; M.busy = m.busy || []; render(); };
+window.onToast = (kind, text) => {
+  const el = document.createElement("div");
+  el.className = "toast " + (kind === "err" ? "err" : "");
+  el.textContent = text;
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), kind === "err" ? 12000 : 6000);
+  el.onclick = () => el.remove();
+};
+
+let pairTarget = null;
+function openPair(kind, value, who) {
+  pairTarget = { kind, value };
+  $("pairWho").textContent = who || value;
+  $("pin").value = "";
+  $("pairModal").classList.add("open");
+  setTimeout(() => $("pin").focus(), 30);
+}
+function closePair() { $("pairModal").classList.remove("open"); pairTarget = null; }
+function submitPair() {
+  const pin = $("pin").value.replace(/\D/g, "");
+  if (pin.length !== 6 || !pairTarget) { $("pin").focus(); return; }
+  send({ action: "pair", target: pairTarget, pin });
+  closePair();
+}
+$("pairGo").onclick = submitPair;
+$("pairCancel").onclick = closePair;
+$("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") submitPair(); if (e.key === "Escape") closePair(); });
+$("pin").addEventListener("input", () => { $("pin").value = $("pin").value.replace(/\D/g, "").slice(0, 6); if ($("pin").value.length === 6) submitPair(); });
+$("pairModal").addEventListener("mousedown", (e) => { if (e.target.id === "pairModal") closePair(); });
+
+$("addrGo").onclick = () => { const v = $("addr").value.trim(); if (v) send({ action: "connect", target: { kind: "addr", value: v } }); };
+$("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") $("addrGo").click(); });
+$("wpGo").onclick = () => { const a = $("wpAddr").value.trim(), c = $("wpCode").value.trim(); if (a && c) send({ action: "adb_pair", addr: a, code: c }); };
+$("wcGo").onclick = () => { const a = $("wcAddr").value.trim(); if (a) send({ action: "adb_connect", addr: a }); };
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-act]");
+  if (!b || b.disabled) return;
+  const d = b.dataset;
+  switch (d.act) {
+    case "connect": send({ action: "connect", target: { kind: d.kind, value: d.value } }); break;
+    case "disconnect": send({ action: "disconnect" }); break;
+    case "pair": openPair(d.kind, d.value, d.who); break;
+    case "forget": send({ action: "forget", agent_id: d.id }); break;
+    case "grant": send({ action: "grant", id: Number(d.id) }); break;
+    case "install": send({ action: "install", serial: d.serial }); break;
+    case "adbwifi": send({ action: "adb_wifi", serial: d.serial }); break;
+    case "adbwifioff": send({ action: "adb_wifi_off", key: d.key }); break;
+    case "toggle": { const id = Number(d.id); expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderDevices(); break; }
+  }
+});
+$("top").addEventListener("mousedown", (e) => { if (e.button === 0 && !e.target.closest("button,.pill")) send({ action: "drag" }); });
+
+send({ action: "ready" });
+</script>
+</body>
+</html>
