@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use hubbridge_link::{ClientAuth, LinkError, SecureSender, client_handshake};
-use hubbridge_proto::{AgentInfo, Frame, Message, UsbDeviceInfo};
+use hubbridge_proto::{AgentInfo, ErrorCode, Frame, Message, Setup, UsbDeviceInfo, UsbStatus};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -27,17 +27,46 @@ pub enum ClientEvent {
     Disconnected(String),
 }
 
-type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Message>>>>;
-
 pub struct Client {
     pub agent_id: String,
     pub agent_name: String,
     pub addr: SocketAddr,
     writer: tokio::sync::Mutex<SecureSender<OwnedWriteHalf>>,
-    pending: Pending,
+    pending: PendingMap,
     next_req: AtomicU32,
     events: Mutex<Option<mpsc::UnboundedReceiver<ClientEvent>>>,
     reader: JoinHandle<()>,
+}
+
+/// An agent-side failure with its code (e.g. no USB permission).
+#[derive(Debug, thiserror::Error)]
+#[error("agent error {code:?}: {message}")]
+pub struct AgentError {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+/// A sent request waiting for its response.
+pub struct Pending {
+    req: u32,
+    rx: oneshot::Receiver<Message>,
+    map: PendingMap,
+}
+
+type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<Message>>>>;
+
+impl Pending {
+    pub async fn wait(self, limit: Duration) -> Result<Message> {
+        match tokio::time::timeout(limit, self.rx).await {
+            Ok(Ok(Message::Error { code, message })) => Err(AgentError { code, message }.into()),
+            Ok(Ok(m)) => Ok(m),
+            Ok(Err(_)) => bail!("connection lost"),
+            Err(_) => {
+                self.map.lock().unwrap().remove(&self.req);
+                bail!("request timed out")
+            }
+        }
+    }
 }
 
 impl Drop for Client {
@@ -121,13 +150,13 @@ impl Client {
         }
         if let Some(a) = store.data.agents.get_mut(&session.agent_id) {
             a.name = session.agent_name.trim().to_string();
-            if !addr.ip().is_loopback() {
-                a.last_addr = Some(addr.to_string());
-            }
+            // Also loopback (simulator, adb forward): mDNS addresses are still tried first,
+            // and a stale forward port just fails over to them.
+            a.last_addr = Some(addr.to_string());
         }
         store.save()?;
 
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let mut receiver = session.receiver;
         let pend = pending.clone();
@@ -170,8 +199,10 @@ impl Client {
         self.events.lock().unwrap().take()
     }
 
-    /// Send a request and wait for its response.
-    pub async fn request(&self, msg: Message) -> Result<Message> {
+    /// Send a request now; the returned [`Pending`] waits for its response. Requests reach
+    /// the agent in the order `submit` is called, so several transfers on one endpoint can
+    /// be in flight and still complete in order.
+    pub async fn submit(&self, msg: Message) -> Result<Pending> {
         let mut req = self.next_req.fetch_add(1, Ordering::Relaxed);
         if req == 0 {
             req = self.next_req.fetch_add(1, Ordering::Relaxed);
@@ -183,15 +214,16 @@ impl Client {
             self.pending.lock().unwrap().remove(&req);
             return Err(e.into());
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(Message::Error { code, message })) => bail!("agent error {code:?}: {message}"),
-            Ok(Ok(m)) => Ok(m),
-            Ok(Err(_)) => bail!("connection lost"),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&req);
-                bail!("request timed out")
-            }
-        }
+        Ok(Pending {
+            req,
+            rx,
+            map: Arc::clone(&self.pending),
+        })
+    }
+
+    /// Send a request and wait for its response.
+    pub async fn request(&self, msg: Message) -> Result<Message> {
+        self.submit(msg).await?.wait(REQUEST_TIMEOUT).await
     }
 
     /// One round trip through the agent.
@@ -224,6 +256,114 @@ impl Client {
         }
     }
 
+    // --- USB data (step 2) -------------------------------------------------------------
+
+    async fn expect_done(&self, msg: Message) -> Result<()> {
+        match self.request(msg).await? {
+            Message::Done => Ok(()),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Open a device on the phone for this session (needs USB permission there).
+    pub async fn open_device(&self, id: u32) -> Result<()> {
+        self.expect_done(Message::OpenDevice { id }).await
+    }
+
+    pub async fn close_device(&self, id: u32) -> Result<()> {
+        self.expect_done(Message::CloseDevice { id }).await
+    }
+
+    /// Claim an interface; `detach` takes it away from the phone's own kernel driver.
+    pub async fn claim_interface(&self, id: u32, interface: u8, detach: bool) -> Result<()> {
+        self.expect_done(Message::ClaimInterface {
+            id,
+            interface,
+            detach_kernel_driver: detach,
+        })
+        .await
+    }
+
+    pub async fn release_interface(&self, id: u32, interface: u8) -> Result<()> {
+        self.expect_done(Message::ReleaseInterface { id, interface }).await
+    }
+
+    pub async fn set_alternate(&self, id: u32, interface: u8, alternate: u8) -> Result<()> {
+        self.expect_done(Message::SetAlternate {
+            id,
+            interface,
+            alternate,
+        })
+        .await
+    }
+
+    pub async fn clear_halt(&self, id: u32, endpoint: u8) -> Result<()> {
+        self.expect_done(Message::ClearHalt { id, endpoint }).await
+    }
+
+    pub async fn reset_device(&self, id: u32) -> Result<()> {
+        self.expect_done(Message::ResetDevice { id }).await
+    }
+
+    /// Control transfer on endpoint 0.
+    pub async fn control(&self, id: u32, setup: Setup, data: Vec<u8>, timeout: Duration) -> Result<UsbReply> {
+        let p = self
+            .submit(Message::Control {
+                id,
+                setup,
+                data,
+                timeout_ms: timeout.as_millis() as u32,
+            })
+            .await?;
+        match p.wait(timeout + REQUEST_TIMEOUT).await? {
+            Message::ControlDone { status, data } => Ok(UsbReply {
+                status,
+                actual: data.len() as u32,
+                data,
+            }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Queue a bulk/interrupt transfer; await the returned [`PendingTransfer`] for the result.
+    pub async fn submit_transfer(
+        &self,
+        id: u32,
+        endpoint: u8,
+        length: u32,
+        data: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<PendingTransfer> {
+        let p = self
+            .submit(Message::Transfer {
+                id,
+                endpoint,
+                length,
+                data,
+                timeout_ms: timeout.as_millis() as u32,
+            })
+            .await?;
+        Ok(PendingTransfer {
+            pending: p,
+            limit: timeout + REQUEST_TIMEOUT,
+        })
+    }
+
+    /// Bulk/interrupt transfer, waiting for the result.
+    pub async fn transfer(
+        &self,
+        id: u32,
+        endpoint: u8,
+        length: u32,
+        data: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<UsbReply> {
+        self.submit_transfer(id, endpoint, length, data, timeout)
+            .await?
+            .wait()
+            .await
+    }
+
     /// Say goodbye and close.
     pub async fn close(self) {
         let mut w = self.writer.lock().await;
@@ -234,5 +374,37 @@ impl Client {
             })
             .await;
         w.shutdown().await;
+    }
+}
+
+/// Result of a control or bulk/interrupt transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbReply {
+    pub status: UsbStatus,
+    pub data: Vec<u8>,
+    pub actual: u32,
+}
+
+impl UsbReply {
+    /// The data, or an error naming the failed status.
+    pub fn ok(self) -> Result<Vec<u8>> {
+        match self.status {
+            UsbStatus::Ok => Ok(self.data),
+            s => bail!("USB transfer failed: {s:?}"),
+        }
+    }
+}
+
+pub struct PendingTransfer {
+    pending: Pending,
+    limit: Duration,
+}
+
+impl PendingTransfer {
+    pub async fn wait(self) -> Result<UsbReply> {
+        match self.pending.wait(self.limit).await? {
+            Message::TransferDone { status, data, actual } => Ok(UsbReply { status, data, actual }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
     }
 }

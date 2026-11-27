@@ -16,6 +16,16 @@ object NativeAgent {
     interface Callbacks {
         fun onPermissionRequested(deviceId: Int)
         fun onStatusChanged()
+
+        /**
+         * A host opens the device: open a `UsbDeviceConnection`, keep it, and return its
+         * usbfs fd (Rust works on a duplicate). -1 = no permission, -2 = no such device,
+         * -3 = open failed.
+         */
+        fun onOpenDevice(deviceId: Int): Int
+
+        /** The host closed the device: close the connection opened in [onOpenDevice]. */
+        fun onCloseDevice(deviceId: Int)
     }
 
     /**

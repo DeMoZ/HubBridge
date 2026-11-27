@@ -39,6 +39,24 @@ pub fn hid_keyboard_raw() -> Vec<u8> {
     v
 }
 
+/// USB flash drive: mass storage, SCSI transparent command set, Bulk-Only Transport.
+pub fn flash_drive_raw() -> Vec<u8> {
+    let mut v = vec![
+        18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 64, 0xcd, 0x14, 0x12, 0x12, 0x00, 0x01, 1, 2, 3, 1,
+    ];
+    v.extend_from_slice(&[
+        // config, wTotalLength = 32
+        9, 0x02, 32, 0, 1, 1, 0, 0x80, 50, //
+        // interface 0: mass storage 08/06/50
+        9, 0x04, 0, 0, 2, 0x08, 0x06, 0x50, 0, //
+        // bulk IN 0x81, 512 bytes
+        7, 0x05, 0x81, 0x02, 0x00, 0x02, 0, //
+        // bulk OUT 0x02, 512 bytes
+        7, 0x05, 0x02, 0x02, 0x00, 0x02, 0,
+    ]);
+    v
+}
+
 fn from_raw(id: u32, raw: Vec<u8>, manufacturer: &str, product: &str, serial: &str) -> UsbDeviceInfo {
     let mut d = UsbDeviceInfo {
         id,
@@ -73,6 +91,10 @@ pub fn cp2102_uart(id: u32) -> UsbDeviceInfo {
 
 pub fn hid_keyboard(id: u32) -> UsbDeviceInfo {
     from_raw(id, hid_keyboard_raw(), "Logitech", "USB Keyboard", "KBD-42")
+}
+
+pub fn flash_drive(id: u32) -> UsbDeviceInfo {
+    from_raw(id, flash_drive_raw(), "Generic", "Mass Storage Device", "121220160204")
 }
 
 /// A device the user has not granted permission for yet: Android shows only what

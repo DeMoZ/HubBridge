@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use hubbridge_agent::fake::{FakeKind, FakeUsb};
 use hubbridge_agent::{Agent, AgentCallbacks, AgentConfig};
 use hubbridge_proto::{DEFAULT_PORT, MDNS_SERVICE_TYPE, PROTO_VERSION, fixtures};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -79,7 +80,33 @@ async fn main() -> Result<()> {
 
     let uart = fixtures::cp2102_uart(1002);
     let keyboard = fixtures::without_permission(fixtures::hid_keyboard(1003));
-    agent.set_devices(vec![uart.clone(), keyboard.clone()]);
+    let drive = fixtures::flash_drive(1004);
+    agent.set_devices(vec![uart.clone(), keyboard.clone(), drive.clone()]);
+
+    // Fake USB behind them: the UART echoes bulk data, the drive answers SCSI (32 MiB).
+    let usb = FakeUsb::new();
+    usb.add(
+        1002,
+        fixtures::cp2102_raw(),
+        &["Silicon Labs", "CP2102 USB to UART Bridge Controller", "0001"],
+        FakeKind::Loopback,
+        true,
+    );
+    usb.add(
+        1003,
+        fixtures::hid_keyboard_raw(),
+        &["Logitech", "USB Keyboard", "KBD-42"],
+        FakeKind::DescriptorsOnly,
+        false,
+    );
+    usb.add(
+        1004,
+        fixtures::flash_drive_raw(),
+        &["Generic", "Mass Storage Device", "121220160204"],
+        FakeKind::MassStorage { blocks: 65536 },
+        true,
+    );
+    agent.set_usb_backend(usb);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -111,7 +138,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(secs)).await;
                 present = !present;
-                let mut list = vec![uart.clone()];
+                let mut list = vec![uart.clone(), drive.clone()];
                 if present {
                     list.push(keyboard.clone());
                 }

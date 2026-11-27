@@ -143,6 +143,115 @@ pub enum Message {
     },
     /// Orderly close.
     Bye,
+
+    // --- Step 2: USB data (host → agent requests; `Done` / `*Done` responses) -----------
+    /// Open the device for this session (exclusive across sessions). Needs USB permission.
+    OpenDevice {
+        id: u32,
+    },
+    CloseDevice {
+        id: u32,
+    },
+    /// Claim an interface; `detach_kernel_driver` takes it from the phone's own driver
+    /// (e.g. Android unmounts a flash drive, stops using a keyboard).
+    ClaimInterface {
+        id: u32,
+        interface: u8,
+        detach_kernel_driver: bool,
+    },
+    ReleaseInterface {
+        id: u32,
+        interface: u8,
+    },
+    SetAlternate {
+        id: u32,
+        interface: u8,
+        alternate: u8,
+    },
+    /// Control transfer on endpoint 0. Direction from `setup.request_type` bit 7:
+    /// IN reads `setup.length` bytes, OUT sends `data`.
+    Control {
+        id: u32,
+        setup: Setup,
+        data: Vec<u8>,
+        timeout_ms: u32,
+    },
+    /// Bulk or interrupt transfer. IN (`endpoint` bit 7 set) reads up to `length` bytes;
+    /// OUT sends `data`. Several may be in flight per endpoint; they complete in order.
+    Transfer {
+        id: u32,
+        endpoint: u8,
+        length: u32,
+        data: Vec<u8>,
+        timeout_ms: u32,
+    },
+    ClearHalt {
+        id: u32,
+        endpoint: u8,
+    },
+    ResetDevice {
+        id: u32,
+    },
+    /// Success of a request that returns nothing.
+    Done,
+    ControlDone {
+        status: UsbStatus,
+        data: Vec<u8>,
+    },
+    TransferDone {
+        status: UsbStatus,
+        data: Vec<u8>,
+        actual: u32,
+    },
+    /// Event: an open device was closed by the agent (unplugged, permission revoked, error).
+    DeviceClosed {
+        id: u32,
+        reason: String,
+    },
+}
+
+/// SETUP packet of a control transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setup {
+    /// `bmRequestType`: bit 7 direction (1 = IN), bits 5..6 type, bits 0..4 recipient.
+    pub request_type: u8,
+    pub request: u8,
+    pub value: u16,
+    pub index: u16,
+    pub length: u16,
+}
+
+impl Setup {
+    pub fn is_in(&self) -> bool {
+        self.request_type & 0x80 != 0
+    }
+
+    /// Standard GET_DESCRIPTOR to the device.
+    pub fn get_descriptor(kind: u8, index: u8, lang: u16, length: u16) -> Self {
+        Setup {
+            request_type: 0x80,
+            request: 0x06,
+            value: (kind as u16) << 8 | index as u16,
+            index: lang,
+            length,
+        }
+    }
+}
+
+/// Outcome of a USB transfer as the device / OS reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsbStatus {
+    Ok,
+    /// The endpoint stalled (device error); clear it with `ClearHalt`.
+    Stall,
+    /// Timed out or cancelled.
+    Cancelled,
+    Disconnected,
+    /// Hardware or protocol error.
+    Fault,
+    /// The OS rejected the request (wrong length, type, endpoint).
+    InvalidArgument,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +259,14 @@ pub enum ErrorCode {
     UnknownDevice,
     Unsupported,
     Internal,
+    /// The user has not granted USB permission for this device on the phone.
+    NoPermission,
+    /// Another session has the device open.
+    Busy,
+    /// The device is not open in this session (or the interface is not claimed).
+    NotOpen,
+    /// The OS refused a USB operation (claim, set alternate, reset...).
+    UsbFailed,
 }
 
 /// Static facts about the agent.

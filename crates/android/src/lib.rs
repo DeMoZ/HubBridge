@@ -95,6 +95,23 @@ struct JavaCallbacks {
 }
 
 impl JavaCallbacks {
+    /// Call a Java method returning `int`; `None` if the call failed.
+    #[cfg_attr(not(any(target_os = "android", target_os = "linux")), allow(dead_code))]
+    fn call_int(&self, method: &str, sig: &str, args: &[jni::objects::JValue]) -> Option<i32> {
+        let mut env = self.vm.attach_current_thread_permanently().ok()?;
+        match env
+            .call_method(self.target.as_obj(), method, sig, args)
+            .and_then(|v| v.i())
+        {
+            Ok(v) => Some(v),
+            Err(_) => {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
+
     fn call(&self, method: &str, sig: &str, args: &[jni::objects::JValue]) {
         let Ok(mut env) = self.vm.attach_current_thread_permanently() else {
             return;
@@ -114,6 +131,34 @@ impl AgentCallbacks for JavaCallbacks {
     fn status_changed(&self) {
         self.call("onStatusChanged", "()V", &[]);
     }
+}
+
+/// USB through the app: Kotlin opens the `UsbDeviceConnection` and returns its fd
+/// (`onOpenDevice`: fd, or -1 no permission, -2 no such device, -3 open failed); we work on
+/// a duplicate and tell Kotlin when to close the connection (`onCloseDevice`).
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn usb_backend(cb: Arc<JavaCallbacks>) -> Arc<dyn hubbridge_agent::usb::UsbBackend> {
+    use hubbridge_agent::usb::UsbError;
+    use std::os::fd::BorrowedFd;
+    let open_cb = Arc::clone(&cb);
+    let opener = Arc::new(move |id: u32| {
+        match open_cb.call_int("onOpenDevice", "(I)I", &[jni::objects::JValue::Int(id as i32)]) {
+            Some(fd) if fd >= 0 => {
+                // Safety: Kotlin keeps the connection (and so the fd) open until onCloseDevice.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                borrowed
+                    .try_clone_to_owned()
+                    .map_err(|e| UsbError::Failed(format!("dup usbfs fd: {e}")))
+            }
+            Some(-1) => Err(UsbError::NoPermission(
+                "allow USB access for this device on the phone".into(),
+            )),
+            Some(-2) => Err(UsbError::NotFound),
+            _ => Err(UsbError::Failed("the phone could not open the device".into())),
+        }
+    });
+    let closer = Arc::new(move |id: u32| cb.call("onCloseDevice", "(I)V", &[jni::objects::JValue::Int(id as i32)]));
+    hubbridge_agent::nusb_backend::NusbBackend::new(opener, closer)
 }
 
 fn init_logging() {
@@ -147,7 +192,7 @@ fn start(
     usb_host: bool,
     port: u16,
     lan: bool,
-    callbacks: Arc<dyn AgentCallbacks>,
+    callbacks: Arc<JavaCallbacks>,
 ) -> Result<u16> {
     stop();
     let agent = Agent::new(AgentConfig {
@@ -158,6 +203,8 @@ fn start(
         app_version,
         usb_host,
     })?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    agent.set_usb_backend(usb_backend(Arc::clone(&callbacks)));
     agent.set_callbacks(callbacks);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
