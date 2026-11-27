@@ -4,7 +4,7 @@
 later the displays and capture dongles) on the hub become usable from a macOS or Windows
 computer.**
 
-Android agent (Kotlin + Rust core) · desktop host for macOS, Windows, Linux (Rust) · MIT
+Android agent (Kotlin + Rust core) · desktop app for macOS and Windows (Rust) · MIT
 
 [Русская версия](README.ru.md)
 
@@ -33,6 +33,25 @@ link is a USB Ethernet adapter in the hub.
 
 More: [architecture](docs/ARCHITECTURE.md) · [protocol](docs/PROTOCOL.md) ·
 [roadmap](docs/ROADMAP.md).
+
+## Desktop app
+
+```bash
+cargo run -p hubbridge-desktop --release      # opens the HubBridge window
+```
+
+- **On this network**: phones running HubBridge (mDNS), paired or not; Pair (PIN), Connect,
+  Forget; connect by IP if mDNS is blocked.
+- **USB and ADB**: phones seen by `adb` over the cable or Wi-Fi, grouped per phone; **Install
+  app** / reinstall, **Connect via ADB**, **ADB over Wi-Fi** (so the phone can go on the hub
+  and stay reachable by adb), Android 11+ wireless-debugging pairing by code.
+- The connected phone: model, Android version, link (Wi-Fi / ADB), live round-trip time
+  with a graph; reconnects by itself; remembers the last phone and connects at start.
+- USB devices on the phone with configurations / interfaces / endpoints and **Ask phone**
+  for USB permission.
+
+Uses the system WebView (tao + wry). adb is optional: needed only for the cable, installing
+the app and ADB over Wi-Fi (`brew install android-platform-tools` on macOS).
 
 ## Try it without a phone
 

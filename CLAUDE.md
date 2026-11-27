@@ -18,6 +18,24 @@ sync when the protocol or the scope changes.
   Use `HUBBRIDGE_HOME=<scratch dir>` and `--state-dir <scratch dir>` so tests do not touch
   the real key stores, and a non-default `--listen 0.0.0.0:<port>` if 47800 is busy.
 
+## Desktop window (`crates/desktop`)
+
+- tao + wry like UsbMemoryChecker: page `src/ui/index.html` (`include_str!`, `/*PLATFORM*/`
+  replaced), controller `src/app.rs` on tokio; the page gets the whole `Model` as JSON
+  (`window.onState`) after each change, toasts via `window.onToast`; requests are
+  `{"action": ...}` JSON matching `app::Request` (serde tag, snake_case).
+- **Never declare a top-level `ipc` in the page script**: wry owns the non-configurable
+  global `window.ipc`, and WebKit then rejects the whole script (empty window, no error).
+  The helper is `send()`.
+- The WebView lives only on the main thread; other threads use the `EventLoopProxy`.
+- Checks: `HUBBRIDGE_DEV_SCRIPT='js'` runs in the page 3 s after start;
+  `HUBBRIDGE_HOME=<scratch dir>` gives a fresh key store. Screenshot only the window:
+  get its id with a CGWindowList Swift snippet (owner name "HubBridge"), then
+  `screencapture -l <id> -o -x shot.png`.
+- adb handling follows UniversalKM (`~/Git/UniversalKM/Sources/UniversalKM/ADBClient.swift`,
+  `AndroidHIDTransport.swift`): the user's adb and shared server, timeouts on every command,
+  `ro.serialno` to merge USB and Wi-Fi transports of one phone.
+
 ## Rules
 
 - The protocol is versioned (`PROTO_VERSION`); only append `Message` variants. Changing
@@ -27,5 +45,6 @@ sync when the protocol or the scope changes.
 - Kotlin ↔ Rust is JSON over JNI; field names in `UsbScanner.kt` must match
   `AndroidDevice` / `ConfigInfo` in `crates/android` and `crates/proto` (test
   `parses_scanner_json`).
-- Windows is a supported host platform in code (CI checks it); no Windows release builds
-  unless Roman asks.
+- Desktop platforms are macOS and Windows. Windows is supported in code (CI checks it); no
+  Windows release builds unless Roman asks. **No Linux builds of the desktop app**: Linux CI
+  only checks the libraries and the CLI (`--exclude hubbridge-desktop`).
