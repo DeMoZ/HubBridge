@@ -42,7 +42,7 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
    card. Tested with fakes in CI; no hardware check yet (no USB-serial device on hand). The
    echo and throughput measurement with a real device stays open (115200 and 3 Mbaud over
    Wi-Fi); it decides whether a generic agent-side IN stream is needed.
-   Follow-up: cancel-safe sends in the host client (#7).
+   Cancel-safe sends in the host client (#7): done.
 4. **USB/IP**: `crates/usbip` codec, agent side executes `CMD_SUBMIT` on usbfs, host side
    localhost server on 3240 tunnelled through the session; attach with
    usbip-win2 on Windows. Test: HID keyboard, Xbox-style gamepad, USB-UART, flash drive.

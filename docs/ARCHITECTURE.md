@@ -61,6 +61,12 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Library `hubbridge-host`: `discover()` (mDNS), `resolve()` (address / name / id / `adb`),
   `Client::pair` / `Client::connect` (tries every resolved address), request/response with
   ids, event stream, `ping()` RTT, `adb::forward()` (reuses an existing forward).
+- Each session has one writer task that owns the socket's write half. `Client::submit`
+  only puts the encoded frame into a bounded queue (64 frames) and waits only while it is
+  full, so callers may time out or be aborted without harming the session; frames leave
+  whole and in the order they were accepted. A write or read failure ends the session for
+  every caller at once ("connection lost: <reason>", one `Disconnected` event); `close()`
+  sends what is queued, then `Bye`, within 2 s.
 - Key store `host.json` in the user config dir, owner-only permissions (Keychain /
   Credential Manager in step 4).
 - Step 1 front end is the `hubbridge` CLI (`discover`, `pair`, `info`, `devices`, `grant`,
