@@ -12,6 +12,7 @@ pub const SERIAL_INIT: u8 = 0xa1;
 pub const MODEM_CTRL: u8 = 0xa4;
 
 const REG_BREAK: u16 = 0x1805;
+const REG_BREAK_PROBE: u16 = 0x0005;
 const REG_BAUD: u16 = 0x1312; // DIVISOR << 8 | PRESCALER
 const REG_LCR: u16 = 0x2518; // LCR2 << 8 | LCR
 const REG_MODEM_STATUS: u16 = 0x0706;
@@ -83,7 +84,13 @@ pub fn serial_init() -> Ctl {
     Ctl::out(OUT, SERIAL_INIT, 0, 0, Vec::new())
 }
 
-/// The read whose failure marks a chip with a limited prescaler and no break support.
+/// `ch341_detect_quirks`: reading register 0x05 (`CH341_REG_BREAK`) stalls on chips with a
+/// limited prescaler and no break support.
+pub fn quirk_probe() -> Ctl {
+    Ctl::read(IN, READ_REG, REG_BREAK_PROBE, 0, 2)
+}
+
+/// The break register as `ch341_break_ctl` reads it (LCR in the high byte).
 pub fn read_break_reg() -> Ctl {
     Ctl::read(IN, READ_REG, REG_BREAK, 0, 2)
 }
@@ -270,6 +277,16 @@ mod tests {
         assert_eq!((on.setup.value, on.setup.index), (0x1805, 0x8300));
         let off = break_write([0x00, 0x83], false);
         assert_eq!(off.setup.index, 0xc301);
+    }
+
+    #[test]
+    fn quirk_probe_reads_register_5_and_break_uses_0x1805() {
+        let q = quirk_probe();
+        assert_eq!(
+            (q.setup.request_type, q.setup.request, q.setup.value, q.setup.length),
+            (0xc0, 0x95, 0x0005, 2)
+        );
+        assert_eq!(read_break_reg().setup.value, 0x1805);
     }
 
     #[test]

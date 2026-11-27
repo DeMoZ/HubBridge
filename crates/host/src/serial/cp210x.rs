@@ -75,6 +75,10 @@ pub fn flow_block(current: &[u8], flow: Flow, dtr: bool, rts: bool) -> Vec<u8> {
     if dtr {
         hs |= DTR_ACTIVE;
     }
+    // No XON/XOFF: AUTO_TRANSMIT and AUTO_RECEIVE off, as cp210x_set_flow_control does for
+    // a termios without IXON/IXOFF. (Some CP2102N need ulXonLimit left alone, erratum E104:
+    // not handled, see tasks.)
+    repl &= !0x3;
     repl &= !RTS_MASK;
     match (flow, rts) {
         (Flow::RtsCts, rts) => {
@@ -277,6 +281,16 @@ mod tests {
         // Both off with RTS/CTS: handshake on, RTS inactive.
         let b = flow_block(&current, Flow::RtsCts, false, false);
         assert_eq!((u32::from_le_bytes([b[4], b[5], b[6], b[7]]) >> 6) & 3, 0);
+    }
+
+    #[test]
+    fn flow_block_clears_xon_xoff_bits() {
+        let mut current = [0u8; 16];
+        current[4..8].copy_from_slice(&(0x40u32 | 0x3).to_le_bytes());
+        let b = flow_block(&current, Flow::None, true, true);
+        let repl = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+        assert_eq!(repl & 0x3, 0, "AUTO_TRANSMIT and AUTO_RECEIVE cleared");
+        assert_eq!((repl >> 6) & 3, 1);
     }
 
     #[test]

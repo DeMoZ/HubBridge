@@ -154,8 +154,19 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
   programs that need one takes com0com + hub4com (or similar), not shipped.
 - The TCP port listens on 127.0.0.1 only unless you give an address, and has no
   authentication; one client at a time.
-- Bytes the device sends while no program has the PTY open wait in the pty queue (a few KB,
-  then they are dropped and counted) and are read by the next program that opens it.
+- Bytes the device sends while no program has the PTY open stay in the bridge's receive
+  buffer (up to 1 MiB, then they are dropped and counted as "dropped") and are read by the
+  next program that opens the PTY.
+- **Linux**: the kernel forces 8 data bits and no parity on a PTY (`pty_set_termios`), so only
+  the speed, stop bits and RTS/CTS a program sets reach the chip; for 7E1 and the like use
+  `--data-bits` / `--parity` (with `--lock-line`) or RFC 2217. On macOS all of them work.
+- **Timing of a speed change**: the PTY's termios is polled (every 100 ms and before each
+  chunk the program writes), so a program that writes data and then changes the rate
+  with `tcsetattr(TCSADRAIN)` can see the new rate applied to bytes it wrote before the change
+  (the bridge cannot tell when the program's output queue drained). Wait for a reply before
+  switching the rate, or use RFC 2217, where the order of commands and data is exact.
+- A failed or cancelled OUT transfer is counted ("failed to send") and reported; three in a
+  row end the bridge.
 
 ## 5. Video latency budget (estimate, 1080p60, good 5 GHz Wi-Fi)
 

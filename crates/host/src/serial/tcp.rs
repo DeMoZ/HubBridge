@@ -43,6 +43,16 @@ pub struct TcpFront {
     addr: SocketAddr,
     warning: Option<String>,
     task: JoinHandle<()>,
+    ended: watch::Receiver<bool>,
+}
+
+/// Tells the watchers when its task ends, however it ends (also when aborted).
+struct EndGuard(watch::Sender<bool>);
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
 }
 
 impl TcpFront {
@@ -59,8 +69,17 @@ impl TcpFront {
         if let Some(w) = &warning {
             warn!("{w}");
         }
-        let task = tokio::spawn(accept_loop(listener, port, opts));
-        Ok(TcpFront { addr, warning, task })
+        let (end_tx, ended) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _end = EndGuard(end_tx);
+            accept_loop(listener, port, opts).await;
+        });
+        Ok(TcpFront {
+            addr,
+            warning,
+            task,
+            ended,
+        })
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -76,9 +95,12 @@ impl TcpFront {
         self.task.abort();
     }
 
-    /// The accept loop ended (port closed).
-    pub async fn finished(&mut self) {
-        let _ = (&mut self.task).await;
+    /// Resolves when the accept loop has ended (port closed, listener error, stopped).
+    pub fn ended(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.ended.clone();
+        async move {
+            let _ = rx.wait_for(|v| *v).await;
+        }
     }
 }
 
@@ -287,16 +309,20 @@ async fn notify_task(
                 let byte = r::modem_state_byte(prev, m);
                 let changed = (byte & 0x0f) | (r::modem_state_byte(prev, prev) ^ r::modem_state_byte(m, m)) & 0xf0;
                 prev = m;
-                if changed & masks.modem.load(Ordering::Relaxed) != 0 && out.send(r::notify_modemstate(byte)).is_err() {
+                // The notification carries the state and the client's mask (state AND mask).
+                let mask = masks.modem.load(Ordering::Relaxed);
+                if changed & mask != 0 && out.send(r::notify_modemstate(byte & mask)).is_err() {
                     return;
                 }
             }
             Ok(PortEvent::LineError(e)) => {
                 let byte = r::line_state_byte(e);
-                if byte & masks.line.load(Ordering::Relaxed) != 0 && out.send(r::notify_linestate(byte)).is_err() {
+                let mask = masks.line.load(Ordering::Relaxed);
+                if byte & mask != 0 && out.send(r::notify_linestate(byte & mask)).is_err() {
                     return;
                 }
             }
+            Ok(PortEvent::OutFailed { .. }) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
@@ -335,7 +361,8 @@ impl Session {
                 self.send(r::reply_baudrate(self.port.line().baud));
             }
             Request::SetDatasize(n) => {
-                if n != 0 {
+                // 0 asks; 5 to 8 are the sizes a UART has, anything else is ignored.
+                if (5..=8).contains(&n) {
                     self.set_line(|l| l.data_bits = n).await;
                 }
                 self.send(r::reply_byte(r::CMD_SET_DATASIZE, self.port.line().data_bits));

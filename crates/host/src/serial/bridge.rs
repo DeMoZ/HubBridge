@@ -33,6 +33,9 @@ pub struct BridgeOptions {
     pub lock_line: bool,
 }
 
+// Not derivable: the PTY is on by default only where there is one (`cfg!(unix)`), and clippy
+// on Windows sees that as the plain `false` default.
+#[allow(clippy::derivable_impls)]
 impl Default for BridgeOptions {
     fn default() -> Self {
         BridgeOptions {
@@ -128,11 +131,34 @@ impl SerialBridge {
             }
             None => None,
         };
-        // Whatever ends first closes the port, so the device is given back.
+        // Whatever ends first closes the port, so the device is given back: the port itself,
+        // or a front end whose listener or terminal failed.
         let supervisor = {
             let port = port.clone();
+            #[cfg(unix)]
+            let pty_ended = pty.as_ref().map(|p| p.ended());
+            let tcp_ended = tcp.as_ref().map(|t| t.ended());
             tokio::spawn(async move {
-                port.done().await;
+                #[cfg(unix)]
+                let pty_end = async {
+                    match pty_ended {
+                        Some(f) => f.await,
+                        None => std::future::pending().await,
+                    }
+                };
+                #[cfg(not(unix))]
+                let pty_end = std::future::pending::<()>();
+                let tcp_end = async {
+                    match tcp_ended {
+                        Some(f) => f.await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = port.done() => {}
+                    _ = pty_end => port.fail("the PTY front end ended".into()),
+                    _ = tcp_end => port.fail("the TCP front end ended".into()),
+                }
                 port.close().await;
             })
         };
@@ -180,8 +206,8 @@ impl BridgeHandle {
         self.port.done().await
     }
 
-    /// Stop the front ends and close the port (the device is given back).
-    pub async fn stop(&self) {
+    /// Stop the front ends; the bridge then ends and closes the port by itself.
+    pub fn stop_fronts(&self) {
         #[cfg(unix)]
         if let Some(p) = &self.pty {
             p.stop();
@@ -189,6 +215,11 @@ impl BridgeHandle {
         if let Some(t) = &self.tcp {
             t.stop();
         }
+    }
+
+    /// Stop the front ends and close the port (the device is given back).
+    pub async fn stop(&self) {
+        self.stop_fronts();
         self.port.close().await;
     }
 }

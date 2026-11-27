@@ -134,6 +134,23 @@ impl FakeUsb {
         self.wake(id);
     }
 
+    /// The next bulk OUT of the serial fake ends with `status` and is not looped back.
+    pub fn fail_next_out(&self, id: u32, status: UsbStatus) {
+        self.serial_of(id).lock().unwrap().fail_next_out(status);
+    }
+
+    /// While set, every bulk IN of the serial fake stalls.
+    pub fn set_stall_in(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_stall_in(on);
+        self.wake(id);
+    }
+
+    /// The next bulk IN ends `Cancelled` but carries `data` (what a cancelled URB can do).
+    pub fn cancel_next_in_with(&self, id: u32, data: &[u8]) {
+        self.serial_of(id).lock().unwrap().cancel_next_in_with(data.to_vec());
+        self.wake(id);
+    }
+
     /// The next bulk IN of the serial fake stalls once.
     pub fn stall_next_in(&self, id: u32) {
         self.serial_of(id).lock().unwrap().stall_next_in();

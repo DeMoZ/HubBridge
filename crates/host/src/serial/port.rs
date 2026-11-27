@@ -12,7 +12,7 @@
 //! written to leave (like `TCSADRAIN`).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +35,8 @@ pub const TX_LIMIT: usize = 64 * 1024;
 pub const OUT_TRANSFER: usize = 16 * 1024;
 /// OUT transfers in flight.
 pub const OUT_IN_FLIGHT: usize = 4;
+/// Longest `close` takes, whatever the phone does.
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct PortOptions {
@@ -87,6 +89,9 @@ pub enum InAction {
     Stop(String),
 }
 
+/// Stalls in a row (clearing the halt in between) before the port stops.
+pub const STALLS_BEFORE_STOP: u32 = 5;
+
 /// Decide from a reply status; `errors_in_row` counts failures without a good reply between.
 pub fn classify_in(status: UsbStatus, errors_in_row: &mut u32) -> InAction {
     match status {
@@ -95,8 +100,13 @@ pub fn classify_in(status: UsbStatus, errors_in_row: &mut u32) -> InAction {
             InAction::Resubmit
         }
         UsbStatus::Stall => {
-            *errors_in_row = 0;
-            InAction::ClearHalt
+            // A stall that clearing does not cure would loop forever.
+            *errors_in_row += 1;
+            if *errors_in_row >= STALLS_BEFORE_STOP {
+                InAction::Stop("the IN endpoint keeps stalling".into())
+            } else {
+                InAction::ClearHalt
+            }
         }
         UsbStatus::Disconnected => InAction::Stop("device disconnected from the phone".into()),
         UsbStatus::InvalidArgument | UsbStatus::Fault | UsbStatus::Unknown => {
@@ -236,6 +246,7 @@ async fn wait_done(rx: &mut watch::Receiver<Option<String>>) {
 #[derive(Default)]
 struct AtomicStats {
     tx: AtomicU64,
+    tx_failed: AtomicU64,
     rx: AtomicU64,
     rx_dropped: AtomicU64,
     overruns: AtomicU64,
@@ -276,7 +287,11 @@ struct Inner {
     events: broadcast::Sender<PortEvent>,
     done_tx: watch::Sender<Option<String>>,
     device_lost: AtomicBool,
+    /// OUT transfers in a row that did not complete.
+    out_fail_row: AtomicU32,
     closed: AtomicBool,
+    /// Set once the shutdown of `close` has finished.
+    closed_tx: watch::Sender<bool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// CDC notifications longer than the interrupt endpoint's packet arrive in pieces.
     notifications: Mutex<Vec<u8>>,
@@ -437,6 +452,7 @@ impl SerialPort {
         opts: PortOptions,
     ) -> Result<SerialPort> {
         // Refused before anything is opened.
+        cfg.line.validate().map_err(|e| anyhow!(e))?;
         let mut det = detect(info, opts.port).map_err(|e| anyhow!(e))?;
         let id = info.id;
         client.open_device(id).await?;
@@ -519,7 +535,9 @@ impl SerialPort {
                 events,
                 done_tx,
                 device_lost: AtomicBool::new(false),
+                out_fail_row: AtomicU32::new(0),
                 closed: AtomicBool::new(false),
+                closed_tx: watch::channel(false).0,
                 tasks: Mutex::new(Vec::new()),
                 notifications: Mutex::new(Vec::new()),
             });
@@ -585,6 +603,7 @@ impl SerialPort {
         let s = &self.inner.stats;
         Stats {
             tx: s.tx.load(Ordering::Relaxed),
+            tx_failed: s.tx_failed.load(Ordering::Relaxed),
             rx: s.rx.load(Ordering::Relaxed),
             rx_dropped: s.rx_dropped.load(Ordering::Relaxed),
             overruns: s.overruns.load(Ordering::Relaxed),
@@ -690,6 +709,7 @@ impl SerialPort {
     /// settings in effect, which may differ where the chip cannot do what was asked; a rate
     /// the chip cannot do is an error and the line keeps its previous settings.
     pub async fn set_line(&self, line: Line) -> Result<Line> {
+        line.validate().map_err(|e| anyhow!(e))?;
         self.drain().await;
         let i = &self.inner;
         let _g = i.ctl_lock.lock().await;
@@ -783,6 +803,9 @@ impl SerialPort {
     pub async fn close(&self) {
         let i = &self.inner;
         if i.closed.swap(true, Ordering::SeqCst) {
+            // Someone else is closing: wait until the device is given back.
+            let mut rx = i.closed_tx.subscribe();
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT * 2, rx.wait_for(|v| *v)).await;
             return;
         }
         i.stop_with("port closed".into());
@@ -790,14 +813,34 @@ impl SerialPort {
         for t in tasks {
             t.abort();
         }
-        if !i.device_lost.load(Ordering::Relaxed) {
-            let _g = i.ctl_lock.lock().await;
-            let _ = shutdown_chip(i).await;
-            for n in i.det.claim.iter().rev() {
-                let _ = i.client.release_interface(i.id, *n).await;
+        // The whole shutdown has CLOSE_TIMEOUT: on a half-open session every request would
+        // otherwise wait its own timeout.
+        let shutdown = async {
+            if !i.device_lost.load(Ordering::Relaxed) {
+                let _g = i.ctl_lock.lock().await;
+                let _ = shutdown_chip(i).await;
+                for n in i.det.claim.iter().rev() {
+                    if i.device_lost.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = i.client.release_interface(i.id, *n).await;
+                }
             }
+            // A fatal error means the session or the device is gone: nothing to close.
+            if !i.device_lost.load(Ordering::Relaxed) {
+                let _ = i.client.close_device(i.id).await;
+            }
+        };
+        if tokio::time::timeout(CLOSE_TIMEOUT, shutdown).await.is_err() {
+            i.device_lost.store(true, Ordering::Relaxed);
+            tracing::warn!("closing the serial port timed out: the phone does not answer");
         }
-        let _ = i.client.close_device(i.id).await;
+        i.closed_tx.send_replace(true);
+    }
+
+    /// End the port from outside (a front end failed): `close` follows.
+    pub fn fail(&self, reason: String) {
+        self.inner.stop_with(reason);
     }
 }
 
@@ -861,10 +904,13 @@ async fn configure(i: &Inner, cfg: &SerialConfig) -> Result<()> {
             let version = *version.first().ok_or_else(|| anyhow!("CH34x gave no chip version"))?;
             // The chip variants without break support (and with a limited prescaler) stall
             // the read of the break register.
-            let limited = match i.raw_reply("read break register", ch34x::read_break_reg()).await? {
+            let limited = match i.raw_reply("quirk probe", ch34x::quirk_probe()).await? {
                 r if r.status == UsbStatus::Ok => false,
                 r if r.status == UsbStatus::Stall => true,
-                r => bail!("CH34x read break register failed: {:?}", r.status),
+                r => {
+                    tracing::warn!("CH34x quirk probe answered {:?}", r.status);
+                    bail!("CH34x quirk probe failed: {:?}", r.status);
+                }
             };
             let line = ch34x::effective_line(cfg.line);
             let baud = ch34x::set_baud(version, line.baud, limited).map_err(|e| anyhow!(e))?;
@@ -1079,10 +1125,21 @@ async fn set_break_locked(i: &Inner, on: bool) -> Result<()> {
 /// Close-time requests: lines off, CP210x purge and interface disable. Failures are ignored.
 async fn shutdown_chip(i: &Inner) -> Result<()> {
     let iface = i.det.control_interface;
+    let gone = || i.device_lost.load(Ordering::Relaxed);
+    // Like ftdi_sio.c: flow control off before the lines drop.
+    if i.det.kind == DriverKind::Ftdi {
+        let ty = i.chip_state().ftdi.expect("FTDI type known after open");
+        let _ = i.raw("SET_FLOW_CTRL", ftdi::set_flow_ctrl(ty, iface, Flow::None)).await;
+    }
+    if gone() {
+        return Ok(());
+    }
     let _ = set_lines_locked(i, Some(false), Some(false)).await;
-    if i.det.kind == DriverKind::Cp210x {
+    if i.det.kind == DriverKind::Cp210x && !gone() {
         let _ = i.raw("PURGE", cp210x::purge(iface, true, true)).await;
-        i.raw("IFC_ENABLE", cp210x::ifc_enable(iface, false)).await?;
+        if !gone() {
+            i.raw("IFC_ENABLE", cp210x::ifc_enable(iface, false)).await?;
+        }
     }
     Ok(())
 }
@@ -1238,9 +1295,15 @@ async fn out_writer(inner: Arc<Inner>) {
             c
         };
         let n = chunk.len();
+        // With RTS/CTS the peer may hold the line for a long time: wait as long as the agent allows.
+        let timeout = if inner.chip_state().flow == Flow::RtsCts {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(10)
+        };
         let sent = inner
             .client
-            .submit_transfer(inner.id, inner.det.bulk_out, 0, chunk, Duration::from_secs(10))
+            .submit_transfer(inner.id, inner.det.bulk_out, 0, chunk, timeout)
             .await;
         match sent {
             Ok(p) => {
@@ -1261,22 +1324,41 @@ async fn out_writer(inner: Arc<Inner>) {
 
 async fn finish_out(inner: &Inner, n: usize, r: Result<UsbReply>) {
     let mut stop = None;
-    match &r {
-        Ok(r) if r.status == UsbStatus::Ok => {
-            inner
-                .stats
-                .tx
-                .fetch_add(r.actual.min(n as u32) as u64, Ordering::Relaxed);
+    // Bytes that did not go out, and how the transfer ended.
+    let (failed, status) = match &r {
+        Ok(r) => {
+            let sent = (r.actual as usize).min(n);
+            if r.status == UsbStatus::Ok || sent > 0 {
+                inner.stats.tx.fetch_add(sent as u64, Ordering::Relaxed);
+            }
+            match r.status {
+                UsbStatus::Stall => {
+                    if let Err(e) = inner.client.clear_halt(inner.id, inner.det.bulk_out).await {
+                        inner.note_error(&e);
+                    }
+                }
+                UsbStatus::Disconnected => stop = Some("device disconnected from the phone".to_string()),
+                _ => {}
+            }
+            (n - sent, r.status)
         }
-        Ok(r) if r.status == UsbStatus::Stall => {
-            let _ = inner.client.clear_halt(inner.id, inner.det.bulk_out).await;
-        }
-        Ok(r) if r.status == UsbStatus::Disconnected => stop = Some("device disconnected from the phone".to_string()),
-        Ok(_) => {}
         Err(e) => {
             inner.note_error(e);
             stop = Some(format!("OUT transfer failed: {e:#}"));
+            (n, UsbStatus::Unknown)
         }
+    };
+    if failed > 0 {
+        inner.stats.tx_failed.fetch_add(failed as u64, Ordering::Relaxed);
+        let _ = inner.events.send(PortEvent::OutFailed {
+            bytes: failed as u32,
+            status,
+        });
+        if inner.out_fail_row.fetch_add(1, Ordering::Relaxed) + 1 >= 3 && stop.is_none() {
+            stop = Some(format!("OUT transfers keep failing ({status:?})"));
+        }
+    } else {
+        inner.out_fail_row.store(0, Ordering::Relaxed);
     }
     {
         let mut g = inner.tx.st.lock().unwrap();
@@ -1330,9 +1412,19 @@ mod tests {
     }
 
     #[test]
-    fn stall_clears_the_halt() {
-        let mut n = 1;
-        assert_eq!(classify_in(UsbStatus::Stall, &mut n), InAction::ClearHalt);
+    fn stall_clears_the_halt_but_not_forever() {
+        let mut n = 0;
+        for _ in 1..STALLS_BEFORE_STOP {
+            assert_eq!(classify_in(UsbStatus::Stall, &mut n), InAction::ClearHalt);
+        }
+        match classify_in(UsbStatus::Stall, &mut n) {
+            InAction::Stop(r) => assert!(r.contains("stalling")),
+            other => panic!("{other:?}"),
+        }
+        // A good reply in between starts the count again.
+        let mut n = 0;
+        classify_in(UsbStatus::Stall, &mut n);
+        classify_in(UsbStatus::Ok, &mut n);
         assert_eq!(n, 0);
     }
 

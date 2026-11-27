@@ -127,3 +127,20 @@ pub fn rtt_summary(samples: &[Duration]) -> String {
         v.len()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hubbridge_proto::fixtures;
+
+    #[test]
+    fn device_lists_the_serial_driver() {
+        let uart = device(&fixtures::cp2102_uart(1));
+        assert!(uart.contains("serial: CP210x"), "{uart}");
+        assert!(device(&fixtures::cdc_acm_simple(2)).contains("serial: CDC-ACM"));
+        assert!(device(&fixtures::ft232r_uart(3)).contains("serial: FTDI (FT232R)"));
+        // A flash drive and a keyboard get no serial line.
+        assert!(!device(&fixtures::flash_drive(4)).contains("serial:"));
+        assert!(!device(&fixtures::hid_keyboard(5)).contains("serial:"));
+    }
+}

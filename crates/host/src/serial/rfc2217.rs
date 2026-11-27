@@ -87,7 +87,12 @@ pub struct Parser {
     state: PState,
     option: u8,
     sb: Vec<u8>,
+    /// The subnegotiation outgrew [`MAX_SUBNEGOTIATION`] and is dropped at its end.
+    sb_overflow: bool,
 }
+
+/// Longest subnegotiation kept; a longer one is dropped (a COM-PORT message is a few bytes).
+pub const MAX_SUBNEGOTIATION: usize = 256;
 
 impl Default for Parser {
     fn default() -> Self {
@@ -101,6 +106,15 @@ impl Parser {
             state: PState::Data,
             option: 0,
             sb: Vec::new(),
+            sb_overflow: false,
+        }
+    }
+
+    fn push_sb(&mut self, b: u8) {
+        if self.sb.len() >= MAX_SUBNEGOTIATION {
+            self.sb_overflow = true;
+        } else {
+            self.sb.push(b);
         }
     }
 
@@ -143,25 +157,29 @@ impl Parser {
                     flush(&mut data, &mut events);
                     self.option = b;
                     self.sb.clear();
+                    self.sb_overflow = false;
                     self.state = PState::SbData;
                 }
                 PState::SbData => {
                     if b == IAC {
                         self.state = PState::SbIac;
                     } else {
-                        self.sb.push(b);
+                        self.push_sb(b);
                     }
                 }
                 PState::SbIac => match b {
                     IAC => {
-                        self.sb.push(IAC);
+                        self.push_sb(IAC);
                         self.state = PState::SbData;
                     }
                     SE => {
-                        events.push(Event::Sub {
-                            option: self.option,
-                            data: std::mem::take(&mut self.sb),
-                        });
+                        let data = std::mem::take(&mut self.sb);
+                        if !std::mem::take(&mut self.sb_overflow) {
+                            events.push(Event::Sub {
+                                option: self.option,
+                                data,
+                            });
+                        }
                         self.state = PState::Data;
                     }
                     // A command inside a subnegotiation ends it without a result.
@@ -232,7 +250,8 @@ fn supported(option: u8) -> bool {
 }
 
 impl Negotiator {
-    /// What the server sends on connect: WILL BINARY, DO BINARY, WILL SGA, WILL COM-PORT.
+    /// What the server sends on connect: WILL BINARY, DO BINARY, WILL SGA, DO COM-PORT-OPTION
+    /// (RFC 2217 §1: the client says WILL, the access server DO).
     pub fn new() -> (Negotiator, Vec<u8>) {
         let mut n = Negotiator {
             opts: vec![OptState::default(); 256],
@@ -242,7 +261,7 @@ impl Negotiator {
             (Verb::Will, OPT_BINARY),
             (Verb::Do, OPT_BINARY),
             (Verb::Will, OPT_SGA),
-            (Verb::Will, OPT_COM_PORT),
+            (Verb::Do, OPT_COM_PORT),
         ] {
             let s = &mut n.opts[opt as usize];
             match verb {
@@ -287,7 +306,7 @@ impl Negotiator {
             }
             // The peer offers to enable (or confirms our DO).
             Verb::Will => {
-                if matches!(option, OPT_BINARY | OPT_SGA) {
+                if matches!(option, OPT_BINARY | OPT_SGA | OPT_COM_PORT) {
                     if s.them {
                         return Vec::new();
                     }
@@ -315,8 +334,10 @@ impl Negotiator {
         }
     }
 
+    /// The client agreed to the COM-PORT-OPTION (WILL), or asked for it (DO).
     pub fn com_port_enabled(&self) -> bool {
-        self.opts[OPT_COM_PORT as usize].us
+        let s = &self.opts[OPT_COM_PORT as usize];
+        s.them || s.us
     }
 }
 
@@ -583,20 +604,56 @@ mod tests {
         let (mut n, hello) = Negotiator::new();
         assert_eq!(
             hello,
-            vec![IAC, WILL, 0, IAC, DO, 0, IAC, WILL, 3, IAC, WILL, 44],
-            "WILL BINARY, DO BINARY, WILL SGA, WILL COM-PORT"
+            vec![IAC, WILL, 0, IAC, DO, 0, IAC, WILL, 3, IAC, DO, 44],
+            "WILL BINARY, DO BINARY, WILL SGA, DO COM-PORT-OPTION"
         );
-        // The client agrees with all of it: no answers.
+        // The client agrees with all of it: no answers. For the COM-PORT-OPTION the client
+        // says WILL (RFC 2217 section 1).
         assert!(n.on_negotiate(Verb::Do, OPT_BINARY).is_empty());
         assert!(n.on_negotiate(Verb::Will, OPT_BINARY).is_empty());
         assert!(n.on_negotiate(Verb::Do, OPT_SGA).is_empty());
-        assert!(n.on_negotiate(Verb::Do, OPT_COM_PORT).is_empty());
+        assert!(n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty());
         assert!(n.com_port_enabled());
+        assert!(n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty(), "no loop");
         // The client's own offer of SGA is accepted once.
         assert_eq!(n.on_negotiate(Verb::Will, OPT_SGA), vec![IAC, DO, 3]);
         assert!(n.on_negotiate(Verb::Will, OPT_SGA).is_empty());
-        // Repeated DO is not answered twice.
-        assert!(n.on_negotiate(Verb::Do, OPT_COM_PORT).is_empty());
+    }
+
+    #[test]
+    fn client_will_com_port_is_accepted_and_do_is_tolerated() {
+        // A client that answers our DO with WILL: nothing more to say, and it works.
+        let (mut n, _hello) = Negotiator::new();
+        assert!(
+            n.on_negotiate(Verb::Will, OPT_COM_PORT).is_empty(),
+            "our DO already asked"
+        );
+        assert!(n.com_port_enabled());
+        // A client that sends DO instead (not per the RFC) gets WILL once and works.
+        let (mut n, _) = Negotiator::new();
+        assert_eq!(n.on_negotiate(Verb::Do, OPT_COM_PORT), vec![IAC, WILL, 44]);
+        assert!(n.on_negotiate(Verb::Do, OPT_COM_PORT).is_empty(), "not answered twice");
+        assert!(n.com_port_enabled());
+        // WONT / DONT turn it off and are confirmed once.
+        let (mut n, _) = Negotiator::new();
+        n.on_negotiate(Verb::Will, OPT_COM_PORT);
+        assert_eq!(n.on_negotiate(Verb::Wont, OPT_COM_PORT), vec![IAC, DONT, 44]);
+        assert!(!n.com_port_enabled());
+    }
+
+    #[test]
+    fn long_subnegotiations_are_dropped() {
+        let mut p = Parser::new();
+        let mut msg = vec![IAC, SB, 44];
+        msg.extend(std::iter::repeat_n(7u8, MAX_SUBNEGOTIATION + 10));
+        msg.extend_from_slice(&[IAC, SE, b'x']);
+        assert_eq!(p.feed(&msg), vec![Event::Data(vec![b'x'])]);
+        // Exactly at the limit is kept, and the parser works afterwards.
+        let mut ok = vec![IAC, SB, 44];
+        ok.extend(std::iter::repeat_n(7u8, MAX_SUBNEGOTIATION));
+        ok.extend_from_slice(&[IAC, SE]);
+        assert_eq!(p.feed(&ok).len(), 1);
+        assert_eq!(p.feed(&[IAC, SB, 44, 1, IAC, SE]).len(), 1);
     }
 
     #[test]

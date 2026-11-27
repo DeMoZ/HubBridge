@@ -29,9 +29,60 @@ struct Env {
     usb: Arc<FakeUsb>,
     client: Arc<Client>,
     infos: Vec<UsbDeviceInfo>,
+    /// Set to stop the proxy between host and agent from passing anything on (a half-open
+    /// session); only with [`env_proxied`].
+    freeze: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn env() -> Env {
+    env_with(false).await
+}
+
+/// A TCP proxy that can be frozen sits between the host and the agent.
+async fn env_proxied() -> Env {
+    env_with(true).await
+}
+
+/// Copy bytes one way; while `freeze` is set nothing is passed on (and nothing closes).
+async fn pipe<R, W>(mut from: R, mut to: W, freeze: Arc<std::sync::atomic::AtomicBool>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let Ok(n) = from.read(&mut buf).await else { return };
+        if n == 0 {
+            return;
+        }
+        while freeze.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn proxy(upstream: std::net::SocketAddr, freeze: Arc<std::sync::atomic::AtomicBool>) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((down, _)) = listener.accept().await else { return };
+            let Ok(up) = tokio::net::TcpStream::connect(upstream).await else {
+                return;
+            };
+            let ((dr, dw), (ur, uw)) = (down.into_split(), up.into_split());
+            tokio::spawn(pipe(dr, uw, Arc::clone(&freeze)));
+            tokio::spawn(pipe(ur, dw, Arc::clone(&freeze)));
+        }
+    });
+    addr
+}
+
+async fn env_with(proxied: bool) -> Env {
     let agent = Agent::new(AgentConfig {
         state_dir: temp_dir("agent"),
         name: "Serial Phone".into(),
@@ -84,12 +135,19 @@ async fn env() -> Env {
     let mut store = Store::load(&temp_dir("host").join("host.json")).unwrap();
     let pin = agent.start_pairing();
     Client::pair(&[addr], &mut store, &pin).await.unwrap().close().await;
-    let client = Arc::new(Client::connect(&[addr], &mut store).await.unwrap());
+    let freeze = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let via = if proxied {
+        proxy(addr, Arc::clone(&freeze)).await
+    } else {
+        addr
+    };
+    let client = Arc::new(Client::connect(&[via], &mut store).await.unwrap());
     Env {
         agent,
         usb,
         client,
         infos,
+        freeze,
     }
 }
 
@@ -202,7 +260,7 @@ async fn open_sequences_at_115200_8n1() {
         requests(&e.usb, CH340),
         vec![
             (0xc0, 0x5f, 0, 0),
-            (0xc0, 0x95, 0x1805, 0),
+            (0xc0, 0x95, 0x0005, 0),
             (0x40, 0xa1, 0, 0),
             (0x40, 0x9a, 0x1312, 0xcc83),
             (0x40, 0x9a, 0x2518, 0x00c3),
@@ -649,8 +707,14 @@ async fn cp210x_polls_modem_status_only_on_demand() {
     );
     let m = next_modem(&mut rx).await;
     assert!(m.cts);
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let polls = requests(&e.usb, CP2102).iter().filter(|r| r.1 == 0x08).count();
+    let mut polls = 0;
+    for _ in 0..500 {
+        polls = requests(&e.usb, CP2102).iter().filter(|r| r.1 == 0x08).count();
+        if polls >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(polls >= 3, "polled {polls} times");
     p.want_modem_status(false);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -825,7 +889,10 @@ mod pty {
         e.usb.clear_serial_log(CP2102);
         let mut t = tcgetattr(&app).unwrap();
         t.set_speed(57_600).unwrap();
-        t.control_modes |= rustix::termios::ControlModes::PARENB;
+        #[cfg(target_os = "macos")]
+        {
+            t.control_modes |= rustix::termios::ControlModes::PARENB;
+        }
         tcsetattr(&app, OptionalActions::Now, &t).unwrap();
         app_write(&app, b"x");
         wait_for(|| {
@@ -841,13 +908,21 @@ mod pty {
             .iter()
             .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x1e))
             .expect("baud change logged");
+        #[cfg(target_os = "macos")]
         let line = log
             .iter()
             .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x03))
             .expect("line control logged");
-        assert!(baud < out && line < out, "line change before the data: {log:?}");
+        assert!(baud < out, "baud change before the data: {log:?}");
         let d = e.usb.serial_state(CP2102);
-        assert_eq!((d.baud, d.parity), (57_600, 2), "even parity");
+        assert_eq!(d.baud, 57_600);
+        // The Linux kernel forces 8 data bits and no parity on a PTY (pty_set_termios), so the
+        // format can only be changed through a PTY on macOS.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(d.parity, 2, "even parity");
+            assert!(line < out, "line control before the data: {log:?}");
+        }
         assert_eq!(p.line().baud, 57_600);
         pty.stop();
         p.close().await;
@@ -955,12 +1030,21 @@ mod net {
         assert_eq!(n, 0);
         first.write_all(b"two").await.unwrap();
         assert_eq!(read_n(&mut first, 3).await, b"two");
-        // After the first leaves, a new client is served.
+        // After the first leaves, a new client is served (retry until the server noticed).
         drop(first);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let mut third = TcpStream::connect(t.addr()).await.unwrap();
-        third.write_all(b"three").await.unwrap();
-        assert_eq!(read_n(&mut third, 5).await, b"three");
+        let mut served = false;
+        for _ in 0..100 {
+            let mut third = TcpStream::connect(t.addr()).await.unwrap();
+            third.write_all(b"three").await.unwrap();
+            let mut buf = [0u8; 5];
+            if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), third.read_exact(&mut buf)).await
+                && &buf == b"three"
+            {
+                served = true;
+                break;
+            }
+        }
+        assert!(served, "a new client is served once the first one is gone");
         t.stop();
         p.close().await;
     }
@@ -1096,7 +1180,9 @@ mod net {
     async fn rfc2217_negotiation_and_signature() {
         let e = env().await;
         let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
-        assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_COM_PORT)));
+        // RFC 2217 section 1: the access server asks DO, the client answers WILL.
+        assert!(c.negotiations.contains(&(r::Verb::Do, r::OPT_COM_PORT)));
+        assert!(!c.negotiations.contains(&(r::Verb::Will, r::OPT_COM_PORT)));
         assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_BINARY)));
         assert!(c.negotiations.contains(&(r::Verb::Do, r::OPT_BINARY)));
         assert!(c.negotiations.contains(&(r::Verb::Will, r::OPT_SGA)));
@@ -1248,6 +1334,81 @@ mod net {
         let _ = c.sub(107).await; // the current state, sent once when the mask is set
         e.usb.set_modem(CDC, ModemLines::default());
         assert!(c.no_sub(107, Duration::from_millis(400)).await);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_notification_carries_state_and_mask() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CDC, false).await;
+        c.cmd(r::CMD_SET_MODEMSTATE_MASK, &[0x88]).await;
+        assert_eq!(c.sub(111).await, vec![0x88]);
+        let _ = c.sub(107).await;
+        e.usb.set_modem(
+            CDC,
+            ModemLines {
+                dcd: true,
+                dsr: true,
+                ..Default::default()
+            },
+        );
+        // DSR (0x20, 0x02) is outside the mask: only DCD and delta DCD are sent.
+        assert_eq!(c.sub(107).await, vec![0x88]);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn rfc2217_data_size_must_be_5_to_8() {
+        let e = env().await;
+        let (p, t, mut c) = rfc_front(&e, CP2102, false).await;
+        let before = e.usb.serial_log(CP2102).len();
+        for bad in [4u8, 9, 200] {
+            c.cmd(r::CMD_SET_DATASIZE, &[bad]).await;
+            assert_eq!(
+                c.sub(102).await,
+                vec![8],
+                "{bad} is ignored, the size in effect comes back"
+            );
+        }
+        assert_eq!(e.usb.serial_log(CP2102).len(), before, "nothing reached the device");
+        c.cmd(r::CMD_SET_DATASIZE, &[6]).await;
+        assert_eq!(c.sub(102).await, vec![6]);
+        t.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn client_that_sends_will_first_is_served() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let t = TcpFront::start(
+            p.clone(),
+            LOCAL.parse().unwrap(),
+            TcpOptions {
+                rfc2217: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Do not wait for the hello: send WILL COM-PORT-OPTION and a command at once.
+        let mut c = Rfc {
+            s: TcpStream::connect(t.addr()).await.unwrap(),
+            parser: r::Parser::new(),
+            data: Vec::new(),
+            subs: VecDeque::new(),
+            raw: Vec::new(),
+            negotiations: Vec::new(),
+        };
+        c.s.write_all(&r::negotiate(r::Verb::Will, r::OPT_COM_PORT))
+            .await
+            .unwrap();
+        c.cmd(r::CMD_SET_DATASIZE, &[7]).await;
+        assert_eq!(c.sub(102).await, vec![7]);
+        // The server never answers our WILL with DONT.
+        assert!(!c.negotiations.contains(&(r::Verb::Dont, r::OPT_COM_PORT)));
         t.stop();
         p.close().await;
     }
@@ -1554,5 +1715,162 @@ mod bench {
             .is_err()
         );
         p.close().await;
+    }
+}
+
+// --- review round 1 ----------------------------------------------------------------------------
+
+mod review {
+    use hubbridge_host::serial::bridge::{BridgeOptions, SerialBridge};
+    use hubbridge_proto::UsbStatus;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn close_on_a_half_open_session_is_fast() {
+        let e = env_proxied().await;
+        let p = e.open(CP2102).await;
+        let cdc = e.open(CDC).await;
+        // The session goes half open: the phone is still there but nothing gets through.
+        e.freeze.store(true, std::sync::atomic::Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            p.close().await;
+            cdc.close().await;
+        })
+        .await
+        .expect("close does not hang");
+        // Each close gets CLOSE_TIMEOUT (2 s) at most.
+        assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
+        e.freeze.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn failed_out_transfer_is_counted_and_reported() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let mut events = p.subscribe();
+        e.usb.fail_next_out(CP2102, UsbStatus::Fault);
+        p.write(&pattern(100)).await.unwrap();
+        p.drain().await;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(3), events.recv()).await {
+                Ok(Ok(PortEvent::OutFailed { bytes, status })) => {
+                    assert_eq!((bytes, status), (100, UsbStatus::Fault));
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                other => panic!("no OutFailed event: {other:?}"),
+            }
+        }
+        let s = p.stats();
+        assert_eq!((s.tx, s.tx_failed), (0, 100));
+        // One failure does not end the port; the next write works.
+        p.write(b"fine").await.unwrap();
+        assert_eq!(read_exact(&p, 4).await, b"fine");
+        assert_eq!(p.stats().tx, 4);
+        assert!(p.is_done().is_none());
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_that_stalls_forever_stops_the_port() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        e.usb.set_stall_in(CP2102, true);
+        let reason = tokio::time::timeout(Duration::from_secs(5), p.done())
+            .await
+            .expect("the port gives up");
+        assert!(reason.contains("stalling"), "{reason}");
+        e.usb.set_stall_in(CP2102, false);
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_in_reply_with_data_is_delivered() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        e.usb.cancel_next_in_with(CP2102, b"partial");
+        assert_eq!(read_exact(&p, 7).await, b"partial");
+        assert!(p.is_done().is_none(), "a cancelled transfer does not stop the port");
+        // And it keeps reading afterwards.
+        e.usb.inject_rx(CP2102, b"more");
+        assert_eq!(read_exact(&p, 4).await, b"more");
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn bridge_ends_when_a_front_end_ends() {
+        let e = env().await;
+        let opts = BridgeOptions {
+            pty: false,
+            tcp: Some("127.0.0.1:0".parse().unwrap()),
+            ..BridgeOptions::default()
+        };
+        let b = SerialBridge::start(Arc::clone(&e.client), e.info(CP2102), opts)
+            .await
+            .unwrap();
+        b.stop_fronts();
+        let reason = tokio::time::timeout(Duration::from_secs(3), b.done())
+            .await
+            .expect("the bridge ends with its front end");
+        assert!(reason.contains("front end"), "{reason}");
+        // The supervisor closed the port: the device is free again.
+        let mut ok = false;
+        for _ in 0..100 {
+            if e.client.open_device(CP2102).await.is_ok() {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(ok, "the device was given back");
+        e.client.close_device(CP2102).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_data_bits_are_refused_before_opening() {
+        let e = env().await;
+        let cfg = SerialConfig {
+            line: Line {
+                data_bits: 9,
+                ..Line::default()
+            },
+            ..SerialConfig::default()
+        };
+        let err = SerialPort::open(Arc::clone(&e.client), e.info(CP2102), cfg, PortOptions::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("5 to 8"), "{err:#}");
+        // The device was never opened.
+        e.client.open_device(CP2102).await.unwrap();
+        e.client.close_device(CP2102).await.unwrap();
+        let p = e.open(CP2102).await;
+        assert!(
+            p.set_line(Line {
+                data_bits: 4,
+                ..Line::default()
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(p.line().data_bits, 8);
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn ftdi_close_turns_flow_control_off_first() {
+        let e = env().await;
+        let p = e.open(FT232R).await;
+        e.usb.clear_serial_log(FT232R);
+        p.close().await;
+        let reqs = requests(&e.usb, FT232R);
+        assert_eq!(
+            reqs.first(),
+            Some(&(0x40, 0x02, 0, 0)),
+            "flow control off first: {reqs:?}"
+        );
+        assert!(reqs.contains(&(0x40, 0x01, 0x0100, 0)) && reqs.contains(&(0x40, 0x01, 0x0200, 0)));
     }
 }

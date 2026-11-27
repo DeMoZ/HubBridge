@@ -52,6 +52,51 @@ pub fn pattern_byte(i: u64) -> u8 {
     (i.wrapping_mul(7).wrapping_add(i / 251)) as u8
 }
 
+/// Result of checking received bytes against the test stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Check {
+    /// Position in the stream of the next byte expected.
+    pub pos: u64,
+    /// Bytes skipped: expected but not received (found again further on).
+    pub skipped: u64,
+    /// Bytes received with a value that is not in the stream where it should be.
+    pub wrong: u64,
+    /// Stream offset of the first loss or wrong byte.
+    pub first_mismatch: Option<u64>,
+}
+
+/// Compare `chunk` with the stream from `check.pos` on. After a mismatch the stream is
+/// searched ahead (the pattern steps by 7, so a byte pins its position within 256): a byte
+/// that fits further on means the bytes in between were lost, one that fits nowhere is wrong.
+/// So one lost byte is one loss, not an error in every byte after it.
+pub fn check_stream(chunk: &[u8], check: &mut Check) {
+    let mut i = 0;
+    while i < chunk.len() {
+        let b = chunk[i];
+        if b == pattern_byte(check.pos) {
+            check.pos += 1;
+            i += 1;
+            continue;
+        }
+        check.first_mismatch.get_or_insert(check.pos);
+        // A skip is believed when the byte after it fits too (when there is one).
+        let skip = (1..256u64).find(|k| {
+            pattern_byte(check.pos + k) == b && chunk.get(i + 1).is_none_or(|n| *n == pattern_byte(check.pos + k + 1))
+        });
+        match skip {
+            Some(k) => {
+                check.skipped += k;
+                check.pos += k + 1;
+            }
+            None => {
+                check.wrong += 1;
+                check.pos += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
 async fn recv_within(rx: &RxBuffer, d: Duration) -> Option<Vec<u8>> {
     tokio::time::timeout(d, rx.recv()).await.ok().flatten()
 }
@@ -100,6 +145,8 @@ pub struct EchoResult {
     pub line_rate_percent: f64,
     pub lost: u64,
     pub wrong: u64,
+    /// Stream offset of the first byte that was lost or wrong.
+    pub first_mismatch: Option<u64>,
 }
 
 pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoResult> {
@@ -110,6 +157,7 @@ pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoRes
     flush(port).await;
     let mut lost = 0u64;
     let mut wrong = 0u64;
+    let mut first_mismatch: Option<u64> = None;
 
     // Latency of small writes.
     let mut samples = Vec::new();
@@ -132,18 +180,26 @@ pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoRes
             samples.push(start.elapsed());
         }
         lost += (msg.len() - got.len().min(msg.len())) as u64;
-        wrong += got.iter().zip(&msg).filter(|(a, b)| a != b).count() as u64;
+        let mut c = Check {
+            pos: offset - opts.size as u64,
+            ..Check::default()
+        };
+        check_stream(&got, &mut c);
+        wrong += c.wrong;
+        first_mismatch = first_mismatch.or(c.first_mismatch);
         if got.len() < msg.len() {
             // Whatever comes late belongs to this round: do not mix it into the next.
             flush(port).await;
         }
     }
 
-    // Throughput of a long stream with a bounded number of bytes in flight.
+    // Throughput of a long stream with a bounded number of bytes in flight. The stream
+    // restarts at 0, so offsets in the result are stream offsets.
     let total = opts.bytes as u64;
     let (mut sent, mut received) = (0u64, 0u64);
+    let mut check = Check::default();
     let start = Instant::now();
-    while received < total {
+    while check.pos < total {
         while sent < total && sent - received < opts.window as u64 {
             let n = (opts.window as u64 - (sent - received)).min(total - sent).min(4096) as usize;
             let chunk: Vec<u8> = (0..n as u64).map(|i| pattern_byte(sent + i)).collect();
@@ -152,19 +208,16 @@ pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoRes
         }
         match recv_within(&rx, opts.timeout).await {
             Some(c) => {
-                for (i, b) in c.iter().enumerate() {
-                    if *b != pattern_byte(received + i as u64) {
-                        wrong += 1;
-                    }
-                }
+                check_stream(&c, &mut check);
                 received += c.len() as u64;
             }
-            None => {
-                lost += sent - received;
-                break;
-            }
+            None => break,
         }
     }
+    // Everything sent and not received is lost (skips are part of it).
+    lost += sent.saturating_sub(received);
+    wrong += check.wrong;
+    first_mismatch = first_mismatch.or(check.first_mismatch);
     let elapsed = start.elapsed();
     let rate = received as f64 / elapsed.as_secs_f64().max(1e-9);
     let line_rate = line_rate_bytes_per_s(&port.line());
@@ -177,6 +230,7 @@ pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoRes
         line_rate_percent: rate / line_rate * 100.0,
         lost,
         wrong,
+        first_mismatch,
     })
 }
 
@@ -304,6 +358,37 @@ mod tests {
             ..Line::default()
         };
         assert!((line_rate_bytes_per_s(&l) - 115_200.0 / 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn one_lost_byte_is_one_loss() {
+        let stream: Vec<u8> = (0..1000).map(pattern_byte).collect();
+        let mut gap = stream.clone();
+        gap.remove(300);
+        let mut c = Check::default();
+        check_stream(&gap, &mut c);
+        assert_eq!((c.skipped, c.wrong, c.first_mismatch, c.pos), (1, 0, Some(300), 1000));
+        // Split over reads, the loss falls on a chunk border.
+        let mut c = Check::default();
+        check_stream(&gap[..300], &mut c);
+        check_stream(&gap[300..], &mut c);
+        assert_eq!((c.skipped, c.wrong), (1, 0));
+        // A flipped byte is one wrong byte.
+        let mut bad = stream.clone();
+        bad[500] ^= 0x5a;
+        let mut c = Check::default();
+        check_stream(&bad, &mut c);
+        assert_eq!((c.skipped, c.wrong, c.first_mismatch), (0, 1, Some(500)));
+        // A clean stream is clean.
+        let mut c = Check::default();
+        check_stream(&stream, &mut c);
+        assert_eq!((c.skipped, c.wrong, c.first_mismatch), (0, 0, None));
+        // Several lost bytes in a row.
+        let mut gap3 = stream.clone();
+        gap3.drain(10..13);
+        let mut c = Check::default();
+        check_stream(&gap3, &mut c);
+        assert_eq!((c.skipped, c.wrong), (3, 0));
     }
 
     #[test]

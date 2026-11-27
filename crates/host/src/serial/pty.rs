@@ -39,6 +39,16 @@ pub struct PtyOptions {
 pub struct PtyFront {
     path: String,
     tasks: Vec<JoinHandle<()>>,
+    ended: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Tells the watchers when a task ends, however it ends (also when aborted).
+struct EndGuard(Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
 }
 
 /// What an application can set on the slave that matters to a UART.
@@ -96,9 +106,18 @@ pub fn observe(t: &Termios) -> Observed {
 }
 
 /// Raw mode with the UART settings of `obs`.
-fn configure(t: &mut Termios, obs: &Observed) -> Result<()> {
+pub(crate) fn configure(t: &mut Termios, obs: &Observed) -> Result<()> {
     t.make_raw();
-    let mut c = bits(t) & !(libc::CSIZE as u64 | libc::PARENB as u64 | libc::PARODD as u64 | libc::CSTOPB as u64);
+    let mut c = bits(t)
+        & !(libc::CSIZE as u64
+            | libc::PARENB as u64
+            | libc::PARODD as u64
+            | libc::CSTOPB as u64
+            | libc::CRTSCTS as u64);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        c &= !(libc::CMSPAR as u64);
+    }
     c |= match obs.line.data_bits {
         5 => libc::CS5,
         6 => libc::CS6,
@@ -110,6 +129,14 @@ fn configure(t: &mut Termios, obs: &Observed) -> Result<()> {
         if matches!(obs.line.parity, Parity::Odd | Parity::Mark) {
             c |= libc::PARODD as u64;
         }
+        // Mark and space are "stick" parity: odd+stick is mark, even+stick is space.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if matches!(obs.line.parity, Parity::Mark | Parity::Space) {
+            c |= libc::CMSPAR as u64;
+        }
+    }
+    if obs.flow == Flow::RtsCts {
+        c |= libc::CRTSCTS as u64;
     }
     if obs.line.stop_bits == StopBits::Two {
         c |= libc::CSTOPB as u64;
@@ -147,17 +174,27 @@ impl PtyFront {
         #[allow(deprecated)]
         let afd = Arc::new(AsyncFd::new(master).context("register the PTY master")?);
         let slave = Arc::new(slave);
-        let reader = tokio::spawn(master_reader(
-            Arc::clone(&afd),
-            Arc::clone(&slave),
-            port.clone(),
-            opts,
-            observe(&tcgetattr(&*slave)?),
-        ));
-        let writer = tokio::spawn(master_writer(afd, slave, port.tap()));
+        // Either direction ending ends the front end.
+        let (end_tx, ended) = tokio::sync::watch::channel(false);
+        let end_tx = Arc::new(end_tx);
+        let (g1, g2) = (EndGuard(Arc::clone(&end_tx)), EndGuard(end_tx));
+        let observed = observe(&tcgetattr(&*slave)?);
+        let reader = {
+            let (afd, slave, port) = (Arc::clone(&afd), Arc::clone(&slave), port.clone());
+            tokio::spawn(async move {
+                let _end = g1;
+                master_reader(afd, slave, port, opts, observed).await;
+            })
+        };
+        let rx = port.tap();
+        let writer = tokio::spawn(async move {
+            let _end = g2;
+            master_writer(afd, slave, rx).await;
+        });
         Ok(PtyFront {
             path,
             tasks: vec![reader, writer],
+            ended,
         })
     }
 
@@ -173,10 +210,11 @@ impl PtyFront {
         }
     }
 
-    /// Both directions ended (port closed or an I/O error).
-    pub async fn finished(&mut self) {
-        for t in std::mem::take(&mut self.tasks) {
-            let _ = t.await;
+    /// Resolves when a direction has ended (port closed, an I/O error, stopped).
+    pub fn ended(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.ended.clone();
+        async move {
+            let _ = rx.wait_for(|v| *v).await;
         }
     }
 }
@@ -296,5 +334,63 @@ async fn master_writer(afd: Arc<AsyncFd<OwnedFd>>, _slave: Arc<OwnedFd>, rx: Arc
             warn!("PTY write failed: {e}");
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh slave termios from a real pty.
+    fn fresh_termios() -> Termios {
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let name = ptsname(&master, Vec::new()).unwrap();
+        let slave = open(&name, OFlags::RDWR | OFlags::NOCTTY, Mode::empty()).unwrap();
+        tcgetattr(&slave).unwrap()
+    }
+
+    fn obs(parity: Parity, stop_bits: StopBits, data_bits: u8, flow: Flow, baud: u32) -> Observed {
+        Observed {
+            line: Line {
+                baud,
+                data_bits,
+                parity,
+                stop_bits,
+            },
+            flow,
+        }
+    }
+
+    #[test]
+    fn configure_and_observe_round_trip() {
+        let mut cases = vec![
+            obs(Parity::None, StopBits::One, 8, Flow::None, 115_200),
+            obs(Parity::Even, StopBits::Two, 7, Flow::None, 9600),
+            obs(Parity::Odd, StopBits::One, 6, Flow::RtsCts, 57_600),
+            obs(Parity::None, StopBits::One, 5, Flow::RtsCts, 230_400),
+        ];
+        // Stick parity exists on Linux only.
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            cases.push(obs(Parity::Mark, StopBits::One, 8, Flow::None, 9600));
+            cases.push(obs(Parity::Space, StopBits::Two, 8, Flow::RtsCts, 9600));
+        }
+        for want in cases {
+            // Start from a state that has everything set, to see that it gets cleared too.
+            let mut t = fresh_termios();
+            configure(&mut t, &obs(Parity::Odd, StopBits::Two, 7, Flow::RtsCts, 4800)).unwrap();
+            configure(&mut t, &want).unwrap();
+            assert_eq!(observe(&t), want);
+        }
+    }
+
+    #[test]
+    fn flow_control_flag_follows_the_observation() {
+        let mut t = fresh_termios();
+        configure(&mut t, &obs(Parity::None, StopBits::One, 8, Flow::RtsCts, 9600)).unwrap();
+        assert_eq!(observe(&t).flow, Flow::RtsCts);
+        configure(&mut t, &obs(Parity::None, StopBits::One, 8, Flow::None, 9600)).unwrap();
+        assert_eq!(observe(&t).flow, Flow::None);
     }
 }

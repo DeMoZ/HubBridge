@@ -272,7 +272,7 @@ const I18N = {
     granted: "permission granted", noPerm: "no permission", ask: "Ask phone", details: "Details", hubInfo: "hub info, not forwardable",
     cfg: "config", intf: "interface", ep: "endpoint", since: "since", appV: "app {v}",
     serialT: "Serial", baudT: "Baud", ptyT: "PTY", tcpT: "TCP port", rfcT: "RFC 2217", startT: "Start", stopT: "Stop", copyT: "Copy",
-    sent: "sent", received: "received", droppedT: "dropped", lineErr: "line errors", stoppedWhy: "Stopped: {r}",
+    sent: "sent", failedT: "failed", received: "received", droppedT: "dropped", lineErr: "line errors", stoppedWhy: "Stopped: {r}",
     pickFront: "Choose a PTY or a TCP port.", badBaud: "Baud rate: a number, e.g. 115200.", badPort: "TCP port: a number from 1 to 65535.",
   },
   ru: {
@@ -300,7 +300,7 @@ const I18N = {
     granted: "разрешение есть", noPerm: "нет разрешения", ask: "Спросить телефон", details: "Подробно", hubInfo: "сведения хаба, не пробрасывается",
     cfg: "конфигурация", intf: "интерфейс", ep: "endpoint", since: "с", appV: "приложение {v}",
     serialT: "Serial", baudT: "Скорость", ptyT: "PTY", tcpT: "TCP-порт", rfcT: "RFC 2217", startT: "Запустить", stopT: "Остановить", copyT: "Копировать",
-    sent: "отправлено", received: "получено", droppedT: "потеряно", lineErr: "ошибок линии", stoppedWhy: "Остановлено: {r}",
+    sent: "отправлено", failedT: "не ушло", received: "получено", droppedT: "потеряно", lineErr: "ошибок линии", stoppedWhy: "Остановлено: {r}",
     pickFront: "Выберите PTY или TCP-порт.", badBaud: "Скорость: число, например 115200.", badPort: "TCP-порт: число от 1 до 65535.",
   },
 };
@@ -458,6 +458,8 @@ const SF = {};
 const sf = (id) => (SF[id] ??= { baud: "115200", pty: !!M.pty_supported, tcp: "", rfc: false });
 const num = (n) => Number(n).toLocaleString("en-US").replaceAll(",", " ");
 
+const counterText = (v) => `↑ ${num(v.tx)} ${t("sent")}${v.tx_failed ? ` (${num(v.tx_failed)} ${t("failedT")})` : ""} · ↓ ${num(v.rx)} ${t("received")} · ${num(v.dropped)} ${t("droppedT")} · ${num(v.errors)} ${t("lineErr")}`;
+
 function serialRow(d) {
   const cap = (M.serial_capable || []).find((c) => c.id === d.id);
   if (!cap || !d.has_permission) return "";
@@ -470,7 +472,7 @@ function serialRow(d) {
       v.tcp ? `<div class="row"><span>TCP</span><span class="mono sel">${esc(v.tcp)}</span>${v.rfc2217 ? `<span class="chip info">${t("rfcT")}</span>` : ""}${btn(t("copyT"), data({ act: "copy", text: v.tcp }), "small ghost")}</div>` : "",
     ].join("");
     return `<div class="serial"><div class="row"><b>${t("serialT")}</b><span class="chip ok sel">${esc(v.driver)} · ${esc(v.line)}</span>${v.chip ? `<span class="chip">${esc(v.chip)}</span>` : ""}</div>${where}
-      <div class="counters mono">↑ ${num(v.tx)} ${t("sent")} · ↓ ${num(v.rx)} ${t("received")} · ${num(v.dropped)} ${t("droppedT")} · ${num(v.errors)} ${t("lineErr")}</div>
+      <div class="counters mono" data-ctr="${v.id}">${counterText(v)}</div>
       <div class="row">${btn(t("stopT"), data({ act: "serialstop", id: d.id }), "small danger")}</div></div>`;
   }
   const f = sf(d.id);
@@ -486,9 +488,16 @@ function serialRow(d) {
 }
 
 function renderDevices() {
-  // Do not replace the cards under the user's cursor while they type in a serial field.
+  // Do not replace the cards while the user types in a serial field (it would lose focus):
+  // the counters of running bridges are updated in place, the rest waits for the field to blur.
   const ae = document.activeElement;
-  if (ae && ae.matches && ae.matches("input") && $("devices").contains(ae)) return;
+  if (ae && ae.matches && ae.matches("input") && $("devices").contains(ae)) {
+    for (const v of M.serial || []) {
+      const el = document.querySelector(`[data-ctr="${v.id}"]`);
+      if (el && v.running) el.textContent = counterText(v);
+    }
+    return;
+  }
   const list = M.devices;
   $("devCount").textContent = list.length ? String(list.length) : "";
   if (M.conn.state !== "connected") {
@@ -595,6 +604,8 @@ document.addEventListener("click", (e) => {
     case "toggle": { const id = Number(d.id); expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderDevices(); break; }
   }
 });
+// Draw what was held back while a field had focus.
+document.addEventListener("focusout", () => setTimeout(() => { if (M) renderDevices(); }, 0));
 document.addEventListener("input", (e) => {
   const el = e.target.closest && e.target.closest("[data-sf]");
   if (!el) return;

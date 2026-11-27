@@ -277,6 +277,7 @@ async fn serial(a: SerialArgs, store: &mut Store) -> Result<()> {
         dtr: matches!(a.dtr, OnOff::On),
         rts: matches!(a.rts, OnOff::On),
     };
+    config.line.validate().map_err(|e| anyhow::anyhow!(e))?;
     let port_opts = PortOptions {
         port: a.port,
         in_flight: a.in_flight.clamp(1, 32),
@@ -309,8 +310,9 @@ async fn serial(a: SerialArgs, store: &mut Store) -> Result<()> {
         let _ = port.refresh_errors().await;
         let s = port.stats();
         println!(
-            "counters: {} bytes sent, {} received, {} dropped, {} line errors",
+            "counters: {} bytes sent, {} failed to send, {} received, {} dropped, {} line errors",
             s.tx,
+            s.tx_failed,
             s.rx,
             s.rx_dropped,
             s.line_errors()
@@ -354,8 +356,14 @@ async fn serial(a: SerialArgs, store: &mut Store) -> Result<()> {
 
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut seq = 0u32;
+    let mut events = bridge.port().subscribe();
     let outcome: Result<()> = loop {
         tokio::select! {
+            ev = events.recv() => {
+                if let Ok(hubbridge_host::serial::PortEvent::OutFailed { bytes, status }) = ev {
+                    eprintln!("warning: {bytes} bytes could not be sent to the device ({status:?})");
+                }
+            }
             _ = tokio::signal::ctrl_c() => break Ok(()),
             reason = bridge.done() => break Err(anyhow::anyhow!("the serial bridge ended: {reason}")),
             _ = tick.tick() => {
@@ -407,6 +415,9 @@ async fn measure(port: &SerialPort, a: &SerialArgs, request: Option<Vec<u8>>) ->
             port.line()
         );
         println!("{} bytes lost, {} wrong", r.lost, r.wrong);
+        if let Some(at) = r.first_mismatch {
+            println!("first mismatch at stream offset {at}");
+        }
     }
     if let Some(request) = request {
         let o = RequestOptions {

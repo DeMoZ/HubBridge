@@ -18,7 +18,7 @@ pub mod pty;
 pub mod rfc2217;
 pub mod tcp;
 
-use hubbridge_proto::Setup;
+use hubbridge_proto::{Setup, UsbStatus};
 
 pub use detect::{Detected, DriverKind, NotSerial, detect};
 pub use port::{PortInfo, PortOptions, SerialPort};
@@ -133,6 +133,16 @@ pub struct SerialConfig {
     pub rts: bool,
 }
 
+impl Line {
+    /// The data bits UARTs of this kind can do.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(5..=8).contains(&self.data_bits) {
+            return Err(format!("{} data bits: 5 to 8 are possible", self.data_bits));
+        }
+        Ok(())
+    }
+}
+
 impl Default for SerialConfig {
     fn default() -> Self {
         SerialConfig {
@@ -171,6 +181,8 @@ impl LineErrors {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
     pub tx: u64,
+    /// Bytes of OUT transfers that did not complete (cancelled, stalled, failed).
+    pub tx_failed: u64,
     pub rx: u64,
     pub rx_dropped: u64,
     pub overruns: u64,
@@ -189,6 +201,11 @@ impl Stats {
 pub enum PortEvent {
     Modem(ModemStatus),
     LineError(LineErrors),
+    /// An OUT transfer did not complete: `bytes` were not sent.
+    OutFailed {
+        bytes: u32,
+        status: UsbStatus,
+    },
 }
 
 /// One control request: SETUP and, for OUT requests, the data stage.

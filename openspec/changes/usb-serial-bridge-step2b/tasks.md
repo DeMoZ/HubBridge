@@ -90,6 +90,29 @@ corrected in the same commit.
 - [ ] 10.7 Optional, only when Roman has a CP2102 / CH340 / FTDI adapter with a TX-RX jumper: `hubbridge serial <id> --baud 115200 --bench-echo` and at a high rate (CP2102: 921600; CP2102N / FT232R / CH340: 2000000 or 3000000; FT232H: 3000000 and 12000000), over Wi-Fi, with `--flow rtscts` too if RTS/CTS are wired; verify latency, KB/s and lost bytes are recorded in the PR and in LIMITATIONS "Serial over Wi-Fi", and decide from them whether the generic agent IN stream (design decision 1) is needed
 - [ ] 10.8 Commit with the OpenSpec change, push the branch, open the PR; verify CI on all three OSes and the APK job are green
 
+## 11. Review round 1
+
+- [x] 11.1 CI (a): `BridgeOptions` default clean for clippy on Windows and unix; verify `cargo clippy --workspace --all-targets -- -D warnings` passes (Windows result: CI)
+- [x] 11.2 CI (b): PTY line-change test robust on Linux (the Linux kernel forces 8 data bits and no parity on a PTY, only the speed is honoured there); verify the test asserts the baud change before the data everywhere and the format only on macOS, and LIMITATIONS says so
+- [x] 11.3 Major 1: `close()` on a half-open session finishes within ~2 s (no shutdown requests once the session is fatal, no `close_device` after a fatal error, overall timeout); verify an e2e test that kills the transport and times `close()`
+- [x] 11.4 Major 2: RFC 2217 server uses DO/DONT for COM-PORT-OPTION (hello `DO 44`, answers client `WILL 44` with `DO 44`, still tolerates a client `DO 44`); verify codec unit tests and an e2e client that negotiates per the RFC
+- [x] 11.5 Major 3: failed or cancelled OUT transfers are counted (`tx_failed`), reported as a `PortEvent` and shown by the CLI and the window, partial `actual` counted, OUT timeout 60 s with RTS/CTS; verify an e2e test with a fake that fails an OUT
+- [x] 11.6 Minor 4: the bridge ends when a front end ends (TCP accept error, PTY read error); verify a unit/e2e test that kills a front end and sees `done()`
+- [x] 11.7 Minor 5: desktop reserves the device id before awaiting the start; a duplicate start is refused without touching the running view; verify a unit test of the reservation (The test found a real bug in the first version of the guard: a duplicate start released the first one's reservation.)
+- [x] 11.8 Minor 6: the page keeps updating counters while a field has focus; verify with the window (scripted focus) or a page-level check (Verified with the real window: a baud field focused on one card, counters of the running bridge kept growing, 6 300 then 15 600 bytes.)
+- [x] 11.9 Minor 7: PTY `configure` sets/clears CRTSCTS from the observed flow and CMSPAR for mark/space on Linux; verify a unit test of `configure`/`observe` round trip
+- [x] 11.10 Minor 8: `flow_block` clears AUTO_RECEIVE/AUTO_TRANSMIT; verify unit test (CP2102N E104 erratum noted only)
+- [x] 11.11 Minor 9: CH34x quirk detection reads register 0x0005 as `ch341_detect_quirks`; break read-modify-write keeps 0x1805; an unexpected status during detection is logged, not treated as "no quirk" silently; verify unit and e2e tests, fake updated
+- [x] 11.12 Minor 10: a permanently stalling IN endpoint stops the port with a reason after N stalls in a row; verify a unit test of `classify_in` and an e2e test with a fake that stalls forever
+- [x] 11.13 Minor 11: RFC 2217 subnegotiation buffer capped at 256 bytes; verify a parser unit test
+- [x] 11.14 Minor 12: LIMITATIONS documents that a PTY line change can apply to bytes written before `tcsetattr(TCSADRAIN)`; verify by reading the doc
+- [x] 11.15 Minor 13: echo benchmark resynchronises so one lost byte is one loss; verify a unit test of the comparison and an e2e run
+- [x] 11.16 Nits: PTY pending-bytes doc matches the code; NOTIFY-MODEMSTATE sends state and mask; `--data-bits` and SET-DATASIZE accept 5..=8 only; FTDI close clears flow control first; the two timing-dependent tests wait on conditions; verify tests
+- [x] 11.17 Missing tests: a `Cancelled` IN reply carrying data is delivered; client `WILL COM-PORT-OPTION`; `format::device` shows `serial: CP210x` and nothing for a flash drive; a refused non-serial device stays unopened; verify they exist and pass (The refused non-serial device test is `close_gives_the_device_back` plus `bridge_refuses_what_cannot_be_served`; the format test is in `format.rs`.)
+- [x] 11.18 Gates after the round: fmt, clippy, tests (serial_e2e three times), Android clippy
+
+Skipped nits: CP2105 SCI limits (second port of a CP2105 is limited to 921600), cost of `refresh_serial_capable` on every model update (a few descriptor walks).
+
 ## Workflow follow-up
 
 - Review round (Opus) against the specs; fixes go back to a Sonnet executor.

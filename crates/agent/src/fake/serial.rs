@@ -125,6 +125,12 @@ pub struct SerialState {
     modem: ModemLines,
     /// FTDI: chips with bcdDevice 0x0600 and below use channel 0 (no port number).
     ftdi_legacy_channel: bool,
+    /// The next bulk OUT ends with this status without reaching the chip (test hook).
+    fail_next_out: Option<UsbStatus>,
+    /// Every bulk IN stalls while set (test hook).
+    stall_in_forever: bool,
+    /// The next bulk IN ends `Cancelled` carrying these bytes (test hook).
+    cancel_next_in: Option<Vec<u8>>,
 }
 
 fn le16(v: u16) -> [u8; 2] {
@@ -219,6 +225,9 @@ impl SerialState {
             log: Vec::new(),
             modem: ModemLines::default(),
             ftdi_legacy_channel: parsed.device.bcd_device <= 0x0600 && parsed.device.bcd_device != 0x0500,
+            fail_next_out: None,
+            stall_in_forever: false,
+            cancel_next_in: None,
         }
     }
 
@@ -253,6 +262,18 @@ impl SerialState {
 
     pub fn stall_next_in(&mut self) {
         self.ports[0].stall_next_in = true;
+    }
+
+    pub fn fail_next_out(&mut self, status: UsbStatus) {
+        self.fail_next_out = Some(status);
+    }
+
+    pub fn set_stall_in(&mut self, on: bool) {
+        self.stall_in_forever = on;
+    }
+
+    pub fn cancel_next_in_with(&mut self, data: Vec<u8>) {
+        self.cancel_next_in = Some(data);
     }
 
     pub fn set_modem(&mut self, lines: ModemLines) {
@@ -328,6 +349,9 @@ impl SerialState {
         let Some(i) = self.port_of_out(ep) else {
             return TransferResult::failed(UsbStatus::InvalidArgument);
         };
+        if let Some(status) = self.fail_next_out.take() {
+            return TransferResult::failed(status);
+        }
         self.log.push(SerialEvent::Out { len: data.len() });
         let loops = match self.chip {
             SerialChip::Cp210x { .. } => self.ports[i].decoded.enabled,
@@ -349,6 +373,17 @@ impl SerialState {
     /// timer fired, an empty chip sends a status-only packet.
     pub fn in_data(&mut self, ep: u8, length: u32, idle_tick: bool) -> Option<TransferResult> {
         if let Some(i) = self.ports.iter().position(|p| p.in_ep == ep) {
+            if self.stall_in_forever {
+                return Some(TransferResult::failed(UsbStatus::Stall));
+            }
+            if let Some(data) = self.cancel_next_in.take() {
+                let actual = data.len() as u32;
+                return Some(TransferResult {
+                    status: UsbStatus::Cancelled,
+                    data,
+                    actual,
+                });
+            }
             if std::mem::take(&mut self.ports[i].stall_next_in) {
                 return Some(TransferResult::failed(UsbStatus::Stall));
             }
@@ -637,6 +672,8 @@ impl SerialState {
                 _ => None,
             },
             (0xc0, 0x95) => match s.value {
+                // ch341_detect_quirks reads register 0x05; a limited chip stalls it.
+                0x0005 if !limited => Self::reply(s, &[0x01, 0x00]),
                 0x0706 => Self::reply(s, &[!bits, 0]),
                 0x1805 if !limited => Self::reply(s, &p.break_reg.clone()),
                 _ => None,

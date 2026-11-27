@@ -303,6 +303,10 @@ async fn ch34x_requests_and_interrupt_packets() {
     );
     let dev = open(&usb, 9, &[0]).await;
     assert_eq!(
+        ctl_in(&dev, setup(0xc0, 0x95, 0x0005, 0, 2)).await.status,
+        UsbStatus::Stall
+    );
+    assert_eq!(
         ctl_in(&dev, setup(0xc0, 0x95, 0x1805, 0, 2)).await.status,
         UsbStatus::Stall
     );

@@ -63,6 +63,8 @@ pub struct SerialView {
     /// `115200 8N1`.
     pub line: String,
     pub tx: u64,
+    /// Bytes that could not be sent to the device.
+    pub tx_failed: u64,
     pub rx: u64,
     pub dropped: u64,
     pub errors: u64,
@@ -279,6 +281,27 @@ pub struct App {
     browser: Mutex<Option<Browser>>,
     /// Running serial bridges by device id.
     bridges: Mutex<HashMap<u32, Arc<BridgeHandle>>>,
+    /// Devices whose bridge is being started (the id is taken before the first await).
+    starting: Mutex<BTreeSet<u32>>,
+}
+
+/// A device id reserved for a starting bridge; released when dropped.
+struct StartGuard<'a> {
+    set: &'a Mutex<BTreeSet<u32>>,
+    id: u32,
+}
+
+impl<'a> StartGuard<'a> {
+    /// `None` when a start for this id is already under way.
+    fn reserve(set: &'a Mutex<BTreeSet<u32>>, id: u32) -> Option<StartGuard<'a>> {
+        lock(set).insert(id).then(|| StartGuard { set, id })
+    }
+}
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.set).remove(&self.id);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -331,6 +354,7 @@ impl App {
             manual_idle: Mutex::new(false),
             browser: Mutex::new(None),
             bridges: Mutex::new(HashMap::new()),
+            starting: Mutex::new(BTreeSet::new()),
         });
         lock(&app.model).conn.state = "idle".into();
         app.start_background();
@@ -682,6 +706,7 @@ impl App {
             rfc2217: i.rfc2217,
             line: i.line.to_string(),
             tx: s.tx,
+            tx_failed: s.tx_failed,
             rx: s.rx,
             dropped: s.rx_dropped,
             errors: s.line_errors(),
@@ -714,8 +739,15 @@ impl App {
                 };
             });
         };
+        // Taken before the first await: two quick Start presses must not open the device twice.
+        // Refusing a duplicate leaves the running bridge's card alone.
+        let Some(_reserved) = StartGuard::reserve(&self.starting, id) else {
+            self.toast("err", "This serial bridge is already starting.");
+            return;
+        };
         if lock(&self.bridges).contains_key(&id) {
-            return fail("This serial bridge is already running.".into());
+            self.toast("err", "This serial bridge is already running.");
+            return;
         }
         let Some(client) = lock(&self.client).clone() else {
             return fail("Not connected.".into());
@@ -797,7 +829,8 @@ impl App {
                 if let Some(v) = m.serial.iter_mut().find(|v| v.id == *id && v.running) {
                     let s = b.stats();
                     let line = b.info().line.to_string();
-                    (v.tx, v.rx, v.dropped, v.errors, v.line) = (s.tx, s.rx, s.rx_dropped, s.line_errors(), line);
+                    (v.tx, v.tx_failed, v.rx, v.dropped, v.errors, v.line) =
+                        (s.tx, s.tx_failed, s.rx, s.rx_dropped, s.line_errors(), line);
                 }
             }
         });
@@ -1193,6 +1226,16 @@ mod tests {
         ));
         let r: Request = serde_json::from_str(r#"{"action":"serial_stop","id":1002}"#).unwrap();
         assert!(matches!(r, Request::SerialStop { id: 1002 }));
+    }
+
+    #[test]
+    fn a_device_id_can_be_reserved_once() {
+        let set = Mutex::new(BTreeSet::new());
+        let first = StartGuard::reserve(&set, 7).expect("first start");
+        assert!(StartGuard::reserve(&set, 7).is_none(), "second start refused");
+        assert!(StartGuard::reserve(&set, 8).is_some(), "other devices are independent");
+        drop(first);
+        assert!(StartGuard::reserve(&set, 7).is_some(), "released when the start ends");
     }
 
     #[test]
