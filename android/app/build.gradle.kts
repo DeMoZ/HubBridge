@@ -48,20 +48,23 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = if (hasReleaseKey) {
-                signingConfigs.getByName("release")
-            } else {
-                logger.warn(
-                    "WARNING: HUBBRIDGE_KEYSTORE_* variables are not all set, the release APK is signed with the debug key",
-                )
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+if (!hasReleaseKey) {
+    gradle.taskGraph.whenReady {
+        if (allTasks.any { it.project == project && (it.name == "packageRelease" || it.name == "signReleaseBundle") }) {
+            logger.warn(
+                "WARNING: HUBBRIDGE_KEYSTORE_* variables are not all set, the release build is signed with the debug key",
+            )
+        }
     }
 }
 

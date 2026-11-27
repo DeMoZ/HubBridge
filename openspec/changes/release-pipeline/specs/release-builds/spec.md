@@ -16,11 +16,15 @@ Pushing a tag `vX.Y.Z` SHALL build and publish a GitHub release named "HubBridge
 - **THEN** a release "HubBridge v0.1.0" appears with all release files, and `https://api.github.com/repos/DeMoZ/HubBridge/releases/latest` returns it
 
 ### Requirement: Tag must match the version
-The release SHALL be published only when the tag equals `v` + the workspace version in `Cargo.toml`; on a mismatch the build SHALL stop with an error naming both values and SHALL publish nothing.
+The release SHALL be published only when the tag equals `v` + the workspace version in `Cargo.toml`; on a mismatch the build SHALL stop with an error naming both values and SHALL publish nothing. The tagged commit SHALL also be on the main branch; otherwise the build SHALL stop with an error and SHALL publish nothing.
 
 #### Scenario: Mismatch
 - **WHEN** the tag `v0.2.0` is pushed while `Cargo.toml` says 0.1.0
 - **THEN** the workflow fails with "Tag v0.2.0 doesn't match Cargo.toml (0.1.0)" and no release is created
+
+#### Scenario: Tag outside main
+- **WHEN** a tag `v0.1.0` is pushed on a commit that is not an ancestor of `origin/main`
+- **THEN** the workflow fails early with an error saying the tagged commit is not on main, and no release is created
 
 ### Requirement: Release files and names
 Each release SHALL contain exactly: `HubBridge-macOS-vX.Y.Z.dmg`, `HubBridge-X.Y.Z-macos-arm64.zip`, `HubBridge-X.Y.Z.apk` and `hubbridge-X.Y.Z-macos-arm64.tar.gz`. No Windows and no Linux files SHALL be published.

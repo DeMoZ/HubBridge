@@ -13,7 +13,7 @@ on:
       - docs/releases/**
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check that the tag is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main || { echo "::error::Tag $GITHUB_REF_NAME points to a commit that is not on main, nothing is released"; exit 1; }
       - name: Check the version
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -70,9 +78,17 @@ jobs:
           HUBBRIDGE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
       - name: Verify the APK signature
+        env:
+          RELEASE_CERT_SHA256: ada28626046f1affa03305c1a5e734151c5191f63e216f84a62aa77cbc29e535
         run: |
           apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
-          "$apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+          certs=$("$apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk)
+          echo "$certs"
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
+            signer=$(echo "$certs" | sed -n 's/^.*certificate SHA-256 digest: *//p' | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
+            expected=$(echo "$RELEASE_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')
+            [[ "$signer" == "$expected" ]] || { echo "::error::The APK is not signed with the pinned release certificate (expected $expected, got ${signer:-none})"; exit 1; }
+          fi
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk "dist/HubBridge-$(scripts/version.sh).apk"
       - name: Delete the signing key
@@ -90,6 +106,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Check the version
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -119,6 +137,8 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [android, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
       - name: Check the version

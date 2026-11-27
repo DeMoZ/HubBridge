@@ -103,7 +103,18 @@ staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "HubBridge" -srcfolder "$staging" -ov -format UDZO dist/HubBridge-macOS.dmg
+# GitHub's macOS runners fail hdiutil now and then with "Resource busy".
+for attempt in 1 2 3; do
+  if hdiutil create -volname "HubBridge" -srcfolder "$staging" -ov -format UDZO dist/HubBridge-macOS.dmg; then
+    break
+  fi
+  if [[ $attempt -eq 3 ]]; then
+    echo "hdiutil create failed $attempt times" >&2
+    exit 1
+  fi
+  echo "warning: hdiutil create failed (attempt $attempt of 3), retrying" >&2
+  sleep 5
+done
 
 files=(hubbridge LICENSE)
 [[ -f "$cli/HubBridge.apk" ]] && files=(hubbridge HubBridge.apk LICENSE)

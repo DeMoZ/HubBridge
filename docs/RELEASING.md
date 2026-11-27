@@ -14,7 +14,9 @@ number: `version` in `[workspace.package]` of `Cargo.toml`. `scripts/version.sh`
 3. Merge to `main`.
 4. Tag `v<version>` on `main` and push the tag.
 
-The tag must be `v` + the version in `Cargo.toml`, otherwise the build stops and nothing is published.
+The tag must be `v` + the version in `Cargo.toml`, and the tagged commit must be on `main` (an ancestor of
+`origin/main`), otherwise the build stops and nothing is published. The workflow fetches `main` without credentials,
+which works because the repository is public.
 
 ## What is published
 
@@ -41,6 +43,11 @@ The workflow reads four repository secrets:
 - `ANDROID_KEY_PASSWORD`
 
 Without any of them a tag build fails and names the missing ones. A dry run only warns and signs with the debug key.
+
+A tag build also fails unless the SHA-256 of the APK's signer certificate equals the release certificate pinned in
+`release.yml` (`RELEASE_CERT_SHA256`):
+`ada28626046f1affa03305c1a5e734151c5191f63e216f84a62aa77cbc29e535`. So secrets that hold another key cannot publish a
+release. Dry runs do not check the pin. Change it only together with a deliberate change of the release key.
 
 A local `./gradlew assembleRelease` reads `HUBBRIDGE_KEYSTORE_FILE`, `HUBBRIDGE_KEYSTORE_PASSWORD`,
 `HUBBRIDGE_KEY_ALIAS` and `HUBBRIDGE_KEY_PASSWORD`. If they are not all set, it signs with the debug key and prints a
