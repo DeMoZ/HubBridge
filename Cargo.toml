@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/proto",
+    "crates/link",
+    "crates/agent",
+    "crates/agent-sim",
+    "crates/android",
+    "crates/host",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["DeMoZ"]
+license = "MIT"
+repository = "https://github.com/DeMoZ/HubBridge"
+
+[workspace.dependencies]
+hubbridge-proto = { path = "crates/proto" }
+hubbridge-link = { path = "crates/link" }
+hubbridge-agent = { path = "crates/agent" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+snow = "0.10"
+spake2 = "0.4"
+hkdf = "0.12"
+sha2 = "0.10"
+getrandom = "0.3"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mdns-sd = "0.19"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+jni = "0.21"
+android_logger = "0.15"
+log = "0.4"

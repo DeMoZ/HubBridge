@@ -1,0 +1,61 @@
+# Roadmap
+
+## Step 1 — MVP: protocol, pairing, metadata ✅ (this PR)
+
+- [x] Rust workspace: `proto`, `link`, `agent`, `android` (JNI), `agent-sim`, `host`.
+- [x] Pairing with a 6-digit PIN (SPAKE2), encrypted sessions (Noise NNpsk0), key stores on
+      both sides, attempt limits.
+- [x] Android app: foreground service (`connectedDevice`), wake lock + Wi-Fi low-latency
+      lock, NSD announce, USB attach/detach/permission, device list with raw descriptors.
+- [x] Wi-Fi/LAN (dual-stack listen) and ADB-only (localhost) modes; `hubbridge adb`
+      sets up/reuses `adb forward`.
+- [x] Host CLI: `discover`, `pair`, `info`, `devices [--json]`, `grant`, `ping`, `watch`
+      (events + RTT + reconnect), `agents`, `forget`.
+- [x] Descriptor parser, simulator with fake CP2102 + HID keyboard, unit + e2e tests, CI.
+
+Acceptance on hardware: phone + hub + CP2102/CH340 adapter → `hubbridge devices` shows the
+adapter with its endpoints over Wi-Fi and over `adb forward`; unplugging it shows in
+`hubbridge watch` within a second.
+
+## Step 2 — USB data forwarding
+
+1. `crates/usbio` (Android): open device by fd (`UsbDeviceConnection.getFileDescriptor()`
+   passed through JNI), claim/release interfaces (detach kernel driver), control transfers,
+   async URB queue for bulk/interrupt with configurable depth, cancellation, reset.
+2. Protocol: `OpenDevice`, `ClaimInterface`, `ControlTransfer`, `SubmitUrb`/`UrbComplete`,
+   flow control (per-endpoint credit), binary payloads after the frame header.
+3. First consumer, no OS driver needed: **serial bridge** — CDC-ACM, CP210x, FTDI, CH34x
+   drivers in Rust on the phone; on the host a PTY (macOS/Linux) and a TCP port with
+   RFC 2217 (all platforms). Test: echo loop with an MCU at 115200 and 3 Mbaud, measure
+   throughput and latency.
+4. **USB/IP**: `crates/usbip` codec, agent side executes `CMD_SUBMIT` on usbfs, host side
+   localhost server on 3240 tunnelled through the session; attach with Linux `usbip` and
+   usbip-win2 on Windows. Test: HID keyboard, Xbox-style gamepad, USB-UART, flash drive.
+5. HID proxy for macOS (keyboard/mouse via `CGEvent`; generic HID via HIDDriverKit later).
+
+## Step 3 — Video / virtual display
+
+1. Media connection: QUIC (quinn) datagrams over LAN, TCP over adb; frame header with
+   timestamps, keyframe requests, stats (FPS, bitrate, encode/network/decode latency).
+2. (b) Capture dongle → PC: UVC on the phone (Camera2 external camera if present, else
+   user-space UVC on usbfs), MJPEG pass-through or `MediaCodec` H.264; host window with
+   live stats; then virtual camera (Windows 11 `MFCreateVirtualCamera`, macOS CMIO
+   extension).
+3. (a) PC → phone: Windows IddCx virtual monitor (test-signed for dev; evaluate signed
+   Virtual Display Driver first), macOS `CGVirtualDisplay`; capture + hardware encode;
+   phone decodes with `MediaCodec` low-latency onto its screen or a `Presentation` on the
+   hub's HDMI output.
+4. Measure glass-to-glass latency with a flashing test pattern + phone camera.
+
+## Step 4 — Reliability and UX
+
+- Reconnect with exponential backoff and session resumption of open devices; buffering and
+  back-pressure per endpoint.
+- Adaptive video: pick codec (H.264/HEVC/MJPEG), resolution and bitrate from measured
+  RTT/loss/throughput.
+- Tray app (tao + wry + tray-icon): agents, devices with attach/detach toggles, RTT/link
+  graph, logs; keys in Keychain / Credential Manager.
+- Structured logs on both ends with export; diagnostic bundle.
+- Android: battery-optimization exemption flow, Quick Settings tile, "keep screen on" mode,
+  PIN-less pairing over ADB (the host pushes a one-time secret with `adb shell`).
+- Updates and Support button like the other DeMoZ apps; signed release builds.

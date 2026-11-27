@@ -1,0 +1,24 @@
+[package]
+name = "hubbridge-agent-sim"
+description = "Desktop simulator of the Android agent with fake USB devices, for testing the host without a phone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "hubbridge-agent-sim"
+path = "src/main.rs"
+
+[dependencies]
+hubbridge-proto = { workspace = true }
+hubbridge-agent = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+mdns-sd = { workspace = true }
+clap = { workspace = true }

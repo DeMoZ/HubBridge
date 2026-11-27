@@ -1,0 +1,22 @@
+[package]
+name = "hubbridge-agent"
+description = "HubBridge agent core: TCP server, pairing, sessions, device registry (runs on Android via JNI and in the desktop simulator)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hubbridge-proto = { workspace = true }
+hubbridge-link = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
