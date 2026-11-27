@@ -121,7 +121,7 @@ on an unknown `Message` variant (postcard decode error in `link`), so the host m
 | `detect.rs` | `detect(&UsbDeviceInfo) -> Result<Detected, NotSerial>`: driver kind, chip, interfaces, endpoints, max packet sizes, CDC capabilities |
 | `cdc_acm.rs`, `cp210x.rs`, `ftdi.rs`, `ch34x.rs` | per chip: pure encoders (setup + data for each operation, divisor math, header/notification parsers) and the async open/configure/close sequences |
 | `port.rs` | `SerialPort`: owns `Arc<Client>` + device id; control sequencing, IN pump, OUT writer, modem-status task, stats, events, close |
-| `pty.rs` (`#[cfg(unix)]`) | PTY front end and termios watcher |
+| `pty.rs` (`#[cfg(target_os = "macos")]`) | PTY front end and termios watcher |
 | `rfc2217.rs` | telnet / COM-PORT-OPTION codec as a pure state machine (bytes in → data + commands; encoders out) |
 | `tcp.rs` | TCP listener, one client, raw or RFC 2217 |
 | `bridge.rs` | `SerialBridge::start(client, &UsbDeviceInfo, BridgeOptions) -> BridgeHandle` (`info()`, `stats()`, `stop()`, `done()` with reason) |
@@ -356,7 +356,7 @@ Generic, in `serial/bench.rs`, driven by the CLI; nothing device-specific in the
 
 `Model` gains `serial_capable: Vec<SerialCapable {id, driver, chip}>` (from `detect` when
 devices change), `serial: Vec<SerialView {id, driver, chip, pty, tcp, rfc2217, line, tx,
-rx, dropped, errors, running, error}>` and `pty_supported` (`cfg!(unix)`). `Request` gains
+rx, dropped, errors, running, error}>` and `pty_supported` (`cfg!(target_os = "macos")`). `Request` gains
 `SerialStart {id, baud, pty, tcp_port, rfc2217}` and `SerialStop {id}`. The controller keeps
 `HashMap<u32, BridgeHandle>`; the existing 1 s ping tick refreshes counters while bridges
 run; bridges stop on Disconnect, reconnect (new client), `DeviceClosed` and `DeviceRemoved`.
@@ -366,6 +366,8 @@ button, counters. en/ru strings.
 
 ## Risks / Trade-offs
 
+- [The host client's sends are not cancel-safe: a send cancelled half-way can corrupt the
+  encrypted stream] → separate PR, tracked in GitHub issue #7; not part of this change.
 - [UART chips lose RX bytes at high baud during Wi-Fi stalls (decision 1)] → documented
   with numbers in LIMITATIONS; `--flow rtscts` where wired; overruns visible in counters
   (FTDI/CDC flags, CP210x GET_COMM_STATUS at bench end); generic agent IN stream sketched
@@ -395,7 +397,6 @@ the Android library). Rollback: an older host simply lacks `hubbridge serial`.
 
 ## Open Questions
 
-- Which UART adapter (if any) Roman will get decides when the optional hardware task runs
-  and whether the generic agent IN stream follow-up is needed.
-- Exact Chameleon Ultra read-only command for a throughput figure (if none returns a lot of
-  data, throughput is skipped and the report says so).
+- The hardware check is deferred (Roman's decision, 2026-11-27): there is no real USB-serial
+  device on the hub yet. Whether a generic agent IN stream is needed depends on measurements
+  with a real UART adapter.

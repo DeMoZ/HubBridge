@@ -1753,7 +1753,7 @@ mod review {
         })
         .await
         .expect("close does not hang");
-        // Each close gets CLOSE_TIMEOUT (2 s) at most.
+        // Each close takes about 2 s at most: 1 s for the chip, then release and close_device.
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         e.freeze.store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -1829,7 +1829,20 @@ mod review {
         .expect("open fails");
         assert!(format!("{err:#}").contains("short answer"), "{err:#}");
         e.usb.set_short_reads(CH340, false);
-        // Both failures gave the device back.
+        // The quirk probe answering OK with fewer than 2 bytes fails too.
+        e.usb.set_short_value(CH340, Some(0x0005));
+        let err = SerialPort::open(
+            Arc::clone(&e.client),
+            e.info(CH340),
+            SerialConfig::default(),
+            PortOptions::default(),
+        )
+        .await
+        .err()
+        .expect("open fails");
+        assert!(format!("{err:#}").contains("quirk probe: short answer"), "{err:#}");
+        e.usb.set_short_value(CH340, None);
+        // All failures gave the device back.
         e.client.open_device(CH340).await.unwrap();
         e.client.close_device(CH340).await.unwrap();
         e.open(CH340).await.close().await;

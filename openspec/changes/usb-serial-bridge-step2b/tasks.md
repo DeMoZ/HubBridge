@@ -75,20 +75,23 @@ corrected in the same commit.
 
 ## 9. Integration gates
 
-- [ ] 9.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass on macOS; after push verify the Linux job (PTY code built, desktop excluded) and the Windows job (PTY code compiled out, TCP/RFC 2217 tests run) are green **Status:** the local part passes on macOS (fmt check, clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`: 135 tests green); left unticked because the Linux and Windows CI jobs can only be checked after a push (not done here). Neither target can be compiled on this Mac (`ring` needs a C toolchain for them), so the Linux-only `libc`/`rustix` details of `serial/pty.rs` are unverified until CI.
+- [x] 9.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass on macOS; after push verify the macOS and Windows CI jobs (PTY code compiled out on Windows, TCP/RFC 2217 tests run) are green (CI green on d84ef74: macOS, Windows and the APK job; the Linux job was removed by group 13)
 - [x] 9.2 Confirm the protocol is untouched: `git diff main -- crates/proto/src/lib.rs crates/link docs/PROTOCOL.md` shows no change (fixtures only in `crates/proto/src/fixtures.rs`); verify `PROTO_VERSION` is still 1
 - [x] 9.3 Re-run the Android checks after all agent changes: `cargo ndk -t arm64-v8a -P 26 clippy -p hubbridge-android -p hubbridge-agent -- -D warnings` and `cd android && ./gradlew assembleDebug` (`ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`, `JAVA_HOME=$(/usr/libexec/java_home -v 25)`); verify both succeed
 
-## 10. Hardware check (needs Roman's phone and Chameleon Ultra)
+## 10. Hardware check (skipped by Roman's decision, 2026-11-27)
 
-- [ ] 10.1 Install the rebuilt APK on the phone (`hubbridge install-apk --serial <ip>:5555` over Wi-Fi ADB, or by cable before plugging the hub), start the service, connect over Wi-Fi; verify `hubbridge info` shows the new app version
-- [ ] 10.2 Plug the Chameleon Ultra into the hub; verify `hubbridge devices` lists it with VID/PID 6868:8686 (verified on the Mac) and "serial: CDC-ACM"; `hubbridge grant <id>` and tap Allow; if detection fails, fix it with a new fixture of the Chameleon's real descriptors (`hubbridge usb descriptors <id>`) and a unit test
-- [ ] 10.3 Use the request verified on the Mac: GET_APP_VERSION `11ef03e8000000001500`, expected reply `11ef03e800680002ab0203fb` (12 bytes, status 0x68, version 2.3); never send a command that writes slots, settings or tags; verify the bridged reply is byte-identical
-- [ ] 10.4 Over Wi-Fi: `hubbridge serial <id> --bench-request <hex> --reply-len <n> --count 500`; verify the reply decodes as the firmware version and record p50/p95/max next to `hubbridge ping` RTT and the direct Mac baseline (p50 0.21 ms, p95 0.28 ms) in the PR; note in the PR that `--baud` has no effect on a native CDC device
-- [ ] 10.5 Throughput: if the protocol docs name a read-only command that returns a lot of data (e.g. reading emulator block data of the active slot, or the capabilities list), run it with `--reply-idle-ms 50 --count 100` and record bytes/s; otherwise skip and say so in the PR; verify the PR states which
-- [ ] 10.6 Through the PTY and the window: `hubbridge serial <id> --pty`, send the same read-only request with a stdlib-only Python script on the PTY path and check the reply; then start the bridge from the desktop window and check that the card shows the path and counters move; verify both and attach the window screenshot to the PR
-- [ ] 10.7 Optional, only when Roman has a CP2102 / CH340 / FTDI adapter with a TX-RX jumper: `hubbridge serial <id> --baud 115200 --bench-echo` and at a high rate (CP2102: 921600; CP2102N / FT232R / CH340: 2000000 or 3000000; FT232H: 3000000 and 12000000), over Wi-Fi, with `--flow rtscts` too if RTS/CTS are wired; verify latency, KB/s and lost bytes are recorded in the PR and in LIMITATIONS "Serial over Wi-Fi", and decide from them whether the generic agent IN stream (design decision 1) is needed
-- [ ] 10.8 Commit with the OpenSpec change, push the branch, open the PR; verify CI on all three OSes and the APK job are green
+- [x] 10.1 Install the rebuilt APK on the phone, start the service, connect over Wi-Fi; verify `hubbridge info` shows the new app version (APK installed on the phone over Wi-Fi ADB (done during the change))
+- [x] 10.8 Commit with the OpenSpec change, push the branch, open the PR; verify CI is green (PR #6 exists; CI green on macOS, Windows and the APK job)
+
+Deferred until a real USB-serial device is on the hub:
+
+- Plug the device into the hub; `hubbridge devices` lists it with "serial: ..."; `hubbridge grant <id>` and tap Allow; fix detection with a new fixture of its real descriptors if needed.
+- Send one harmless read-only request through `hubbridge serial <id> --bench-request` and check the bridged reply is byte-identical to a direct run.
+- Over Wi-Fi record p50/p95/max of the request/response latency next to `hubbridge ping` RTT.
+- Throughput with `--reply-idle-ms` on a read-only command that returns a lot of data, if the device has one.
+- Through the PTY and the desktop window: a stdlib-only Python script on the PTY path gets the reply, the window card shows the path and moving counters.
+- With a UART adapter and a TX-RX jumper: `--bench-echo` at 115200 and at high rates (CP2102 921600; CP2102N / FT232R / CH340 2000000 or 3000000; FT232H 3000000 and 12000000), also `--flow rtscts`; record the results in LIMITATIONS "Serial over Wi-Fi" and decide whether the generic agent IN stream is needed.
 
 ## 11. Review round 1
 
@@ -117,7 +120,7 @@ Skipped nits: CP2105 SCI limits (second port of a CP2105 is limited to 921600), 
 
 - [x] 12.1 Flaky counters in tests: `failed_out_transfer_is_counted_and_reported` waits for `stats().tx` instead of asserting right after the echo; the other tests are audited for the same pattern; verify `serial_e2e` passes 20 runs in a row
 - [x] 12.2 `close()` gives the chip shutdown its own budget (1 s, short per-request timeout) and always sends release and `close_device` with their own short timeout unless a fatal transport error was seen; verify an e2e test with a fake chip that never answers a shutdown request: after `close()` another client can open the device
-- [x] 12.3 PTY `sync_line` on Linux and Android takes only speed, stop bits and flow from the termios and keeps data bits and parity from the port (the kernel forces CS8 and no parity); verify a Linux-only test (7E1, speed change keeps 7E1), a pure unit test of the merge that runs everywhere, and the LIMITATIONS wording
+- [x] 12.3 PTY `sync_line` on Linux and Android takes only speed, stop bits and flow from the termios and keeps data bits and parity from the port (the kernel forces CS8 and no parity); verify a Linux-only test (7E1, speed change keeps 7E1), a pure unit test of the merge that runs everywhere, and the LIMITATIONS wording (Round 3 note: 13.5 later removed the Linux-only test and the Linux branches; the PTY is macOS only.)
 - [x] 12.4 RFC 2217 negotiation flags mean "request pending" and are cleared when the peer answers or refuses, so renegotiation after WONT/DONT works without loops; verify unit tests for renegotiation; `com_port_enabled()` is used or removed
 - [x] 12.5 TCP accept loop survives transient accept errors (log, wait 100 ms, go on); verify a unit test of the error classification
 - [x] 12.6 CH34x: unexpected quirk-probe status fails the open (as Linux does), no duplicate warning, a short read is an error; verify host e2e tests for a limited chip (divisor encoding) and for the unexpected-status path; correction note on 11.11
@@ -133,6 +136,14 @@ HubBridge has no Linux platform: desktop is macOS and Windows, USB devices live 
 - [x] 13.5 PTY is macOS only: module, dependencies, bridge, CLI, window and tests use `cfg(target_os = "macos")`; all Linux and Android branches deleted (termios2, stick parity, the Linux merge); verify clippy and tests on macOS, no PTY code compiled elsewhere (cfg review, Windows CI)
 - [x] 13.6 Docs and OpenSpec artifacts: ARCHITECTURE, LIMITATIONS (no Linux column), ROADMAP, proposal, design and both delta specs say PTY on macOS, TCP and RFC 2217 on Windows; verify `git grep -n -i -E 'linux|ubuntu'` shows only the kept categories
 - [x] 13.7 Gates: fmt, clippy, tests, Android clippy, APK, `serial_e2e` five times
+
+## 14. Review round 3
+
+- [x] 14.1 `bench_echo` window arithmetic uses `saturating_sub` in all places (a device that sends more than it received); verify a unit test
+- [x] 14.2 `design.md` says `target_os = "macos"` for `pty.rs` and `pty_supported`; verify by reading
+- [x] 14.3 Nits: 9.1 reworded for the macOS and Windows CI and ticked; note on 12.3 that 13.5 removed its Linux-only test; the stale `CLOSE_TIMEOUT` comment in `serial_e2e.rs` fixed; verify by reading
+- [x] 14.4 Tests: CH34x quirk probe answering OK with fewer than 2 bytes fails the open; the accept classifier knows the Windows error codes (`cfg(windows)` test); verify the e2e test runs and the Windows test compiles under cfg
+- [x] 14.5 Roman's decisions: hardware check skipped (group 10 rewritten, `design.md` Open Questions), cancel-safe client sends tracked in issue #7 (`design.md` Risks, ROADMAP), ROADMAP step 2b text and mark; verify by reading and `git grep -i chameleon -- docs`
 
 ## Workflow follow-up
 

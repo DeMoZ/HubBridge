@@ -200,8 +200,11 @@ pub async fn bench_echo(port: &SerialPort, opts: &EchoOptions) -> Result<EchoRes
     let mut check = Check::default();
     let start = Instant::now();
     while check.pos < total {
-        while sent < total && sent - received < opts.window as u64 {
-            let n = (opts.window as u64 - (sent - received)).min(total - sent).min(4096) as usize;
+        while sent < total && sent.saturating_sub(received) < opts.window as u64 {
+            let n = (opts.window as u64)
+                .saturating_sub(sent.saturating_sub(received))
+                .min(total - sent)
+                .min(4096) as usize;
             let chunk: Vec<u8> = (0..n as u64).map(|i| pattern_byte(sent + i)).collect();
             port.write(&chunk).await?;
             sent += n as u64;
@@ -389,6 +392,19 @@ mod tests {
         let mut c = Check::default();
         check_stream(&gap3, &mut c);
         assert_eq!((c.skipped, c.wrong), (3, 0));
+    }
+
+    #[test]
+    fn window_arithmetic_survives_a_device_that_sends_more_than_it_got() {
+        // A device that talks on its own (a GPS): received can exceed sent.
+        let (sent, received) = (100u64, 400u64);
+        let window = 512u64;
+        assert_eq!(sent.saturating_sub(received), 0);
+        assert_eq!(window.saturating_sub(sent.saturating_sub(received)), 512);
+        // The stream check does not panic on extra bytes either.
+        let mut c = Check::default();
+        check_stream(&vec![0x55u8; 400], &mut c);
+        assert!(c.wrong + c.skipped > 0);
     }
 
     #[test]

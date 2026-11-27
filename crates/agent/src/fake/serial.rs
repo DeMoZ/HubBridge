@@ -131,6 +131,8 @@ pub struct SerialState {
     fail_request: Option<(u8, UsbStatus)>,
     /// Control reads answer with one byte only (test hook).
     short_reads: bool,
+    /// Control reads with this wValue answer with one byte only (test hook).
+    short_value: Option<u16>,
     /// Control requests to the chip are never answered while set (test hook).
     hang_control: bool,
     /// Every bulk IN stalls while set (test hook).
@@ -234,6 +236,7 @@ impl SerialState {
             fail_next_out: None,
             fail_request: None,
             short_reads: false,
+            short_value: None,
             hang_control: false,
             stall_in_forever: false,
             cancel_next_in: None,
@@ -279,6 +282,10 @@ impl SerialState {
 
     pub fn set_fail_request(&mut self, f: Option<(u8, UsbStatus)>) {
         self.fail_request = f;
+    }
+
+    pub fn set_short_value(&mut self, v: Option<u16>) {
+        self.short_value = v;
     }
 
     pub fn set_short_reads(&mut self, on: bool) {
@@ -468,7 +475,7 @@ impl SerialState {
             return Some(TransferResult::failed(status));
         }
         let mut r = self.control_inner(setup, data);
-        if self.short_reads
+        if (self.short_reads || self.short_value == Some(setup.value))
             && let Some(res) = &mut r
             && res.data.len() > 1
         {

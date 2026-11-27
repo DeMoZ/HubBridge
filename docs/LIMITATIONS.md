@@ -101,7 +101,7 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
   about 50 ms at 115200 baud, 6 ms at 921600 and under 2 ms at 3 Mbaud. A Wi-Fi spike longer
   than that loses bytes unless RTS/CTS is wired (`--flow rtscts`); the counters show chip
   overruns where the chip reports them. FTDI holds a transfer until 62 bytes or the latency
-  timer and so absorbs gaps better; native CDC-ACM devices (Chameleon, TinyUSB, ESP32-S3,
+  timer and so absorbs gaps better; native CDC-ACM devices (TinyUSB, ESP32-S3,
   RP2040 boards) hold data in firmware until the host asks, so they slow down instead of
   losing data.
 - **FTDI idle traffic**: an idle FTDI chip answers an IN transfer with a 2-byte status packet

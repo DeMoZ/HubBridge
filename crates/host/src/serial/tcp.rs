@@ -548,6 +548,17 @@ mod tests {
         assert!(!accept_error_is_transient(&Error::from_raw_os_error(libc::EBADF)));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_resource_errors_are_transient() {
+        use std::io::Error;
+        // WSAEMFILE, WSAENOBUFS.
+        assert!(accept_error_is_transient(&Error::from_raw_os_error(10024)));
+        assert!(accept_error_is_transient(&Error::from_raw_os_error(10055)));
+        // WSAEBADF-like errors end the listener.
+        assert!(!accept_error_is_transient(&Error::from_raw_os_error(10009)));
+    }
+
     #[test]
     fn bare_port_means_loopback() {
         assert_eq!(parse_listen("7000").unwrap(), "127.0.0.1:7000".parse().unwrap());

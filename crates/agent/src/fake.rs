@@ -144,6 +144,11 @@ impl FakeUsb {
         self.serial_of(id).lock().unwrap().set_fail_request(f);
     }
 
+    /// Control reads with this wValue get a single byte (`None` clears it).
+    pub fn set_short_value(&self, id: u32, v: Option<u16>) {
+        self.serial_of(id).lock().unwrap().set_short_value(v);
+    }
+
     /// While set, the serial fake answers control reads with a single byte.
     pub fn set_short_reads(&self, id: u32, on: bool) {
         self.serial_of(id).lock().unwrap().set_short_reads(on);
