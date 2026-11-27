@@ -7,6 +7,7 @@ members = [
     "crates/agent-sim",
     "crates/android",
     "crates/host",
+    "crates/desktop",
 ]
 
 [workspace.package]

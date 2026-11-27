@@ -160,6 +160,10 @@ pub fn explain_failure(text: &str) -> Option<&'static str> {
             "Play Protect or the OEM verifier refused the APK; check the phone screen",
         ),
         ("INSTALL_CANCELED_BY_USER", "the install was cancelled on the phone"),
+        (
+            "INSTALL_FAILED_ABORTED",
+            "the phone asked to confirm the install (Samsung/Xiaomi): accept it on the screen and try again",
+        ),
     ];
     HINTS
         .iter()
@@ -167,10 +171,13 @@ pub fn explain_failure(text: &str) -> Option<&'static str> {
         .map(|(_, hint)| *hint)
 }
 
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 async fn adb_install(serial: &str, apk: &Path) -> Result<()> {
     let apk = apk.to_string_lossy();
     // -r replace, -g grant runtime permissions (notifications on Android 13+).
-    match adb::adb(Some(serial), &["install", "-r", "-g", &apk]).await {
+    // Play Protect may scan the APK for a while: allow 3 minutes.
+    match adb::adb_with_timeout(Some(serial), &["install", "-r", "-g", &apk], INSTALL_TIMEOUT).await {
         Ok(out) if out.contains("Success") => Ok(()),
         Ok(out) => bail!("install did not report success: {}", out.trim()),
         Err(e) => {
@@ -191,6 +198,10 @@ pub async fn install(opts: &InstallOptions) -> Result<InstallReport> {
 
     let mut reinstalled = false;
     if let Err(e) = adb_install(&device.serial, &apk.path).await {
+        // A timed-out install may still have finished on the phone.
+        if format!("{e:#}").contains("timed out") && installed_version(&device.serial).await.is_some() {
+            return finish(opts, device, apk, previous_version, false).await;
+        }
         let incompatible = format!("{e:#}").contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE");
         if !(incompatible && opts.replace_incompatible) {
             return Err(e);
@@ -202,7 +213,43 @@ pub async fn install(opts: &InstallOptions) -> Result<InstallReport> {
         reinstalled = true;
     }
 
+    finish(opts, device, apk, previous_version, reinstalled).await
+}
+
+async fn finish(
+    opts: &InstallOptions,
+    device: AdbDevice,
+    apk: ApkSource,
+    previous_version: Option<String>,
+    reinstalled: bool,
+) -> Result<InstallReport> {
     let version = installed_version(&device.serial).await;
+    // Keep the bridge service out of Doze / app standby (works over adb without root;
+    // OEM battery managers may still need the user's tap).
+    let _ = adb::adb(
+        Some(&device.serial),
+        &[
+            "shell",
+            "dumpsys",
+            "deviceidle",
+            "whitelist",
+            &format!("+{APP_PACKAGE}"),
+        ],
+    )
+    .await;
+    let _ = adb::adb(
+        Some(&device.serial),
+        &[
+            "shell",
+            "cmd",
+            "appops",
+            "set",
+            APP_PACKAGE,
+            "RUN_ANY_IN_BACKGROUND",
+            "allow",
+        ],
+    )
+    .await;
     let launched = opts.launch
         && adb::adb(Some(&device.serial), &["shell", "am", "start", "-n", APP_ACTIVITY])
             .await
