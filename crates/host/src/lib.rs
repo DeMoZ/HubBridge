@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod format;
 pub mod install;
 pub mod msc;
+pub mod serial;
 pub mod store;
 
 use std::net::{IpAddr, SocketAddr};

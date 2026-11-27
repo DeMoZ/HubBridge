@@ -168,9 +168,10 @@ dispatch — no async trait objects needed. All encoders are plain functions ret
   in bits 14–16, special cases 1 → 0 and 0x4001 → 1) and `ftdi_2232h_baud_base_to_divisor`
   (base 120 MHz, `divisor3 = round(8·120e6 / (10·baud))`, same table, | 0x20000; used at
   ≥ 1200 baud on H chips). Value = divisor low 16 bits; index = divisor >> 16, and on
-  FT2232C/D, FT2232H, FT4232H, FT232H `index = (divisor >> 16) << 8 | port`, port = 1 for
-  interface 0 (A), 2 for interface 1 (B), … on multi-interface chips and 0 on FT232H (as
-  `change_speed`). Other requests' index = the same port number. IN header (`ftdi_process_packet`):
+  FT2232C/D, FT2232H, FT4232H, FT232H `index = (divisor >> 16) << 8 | port`, port = 1 +
+  bInterfaceNumber (A = 1, B = 2, …; `priv->channel = CHANNEL_A + ifnum`), so 1 on FT232H and
+  FT-X too; only FT232BM and FT232R use channel 0 and a plain `divisor >> 16` (as
+  `ftdi_determine_type` and `change_speed`). Other requests' index = the same port number. IN header (`ftdi_process_packet`):
   byte 0 modem (CTS bit 4, DSR 5, RI 6, DCD 7), byte 1 line (OE bit 1, PE 2, FE 3, BI 4).
   Latency timer default 16 ms (Linux default).
 - **CH34x** — Linux `ch341.c` (preferred over usb-serial-for-android's older register
@@ -189,7 +190,7 @@ dispatch — no async trait objects needed. All encoders are plain functions ret
   unsupported. No RTS/CTS in this change.
 
 Literal test vectors (also in the specs): FT232R 9600 → 0x4138/0, 115200 → 0x001a/0,
-921600 → 0x8003/0, 3 M → 0/0; FT232H 3 M → 0x0004/0x0200, 12 M → 0/0x0200; FT2232H port B
+921600 → 0x8003/0, 3 M → 0/0; FT232H 3 M → 0x0004/0x0201, 12 M → 0/0x0201; FT2232H port B
 115200 → 0xc068/0x0202; CH341 (v0x31) 115200 → 0xcc83, 9600 → 0xb282, 12000 → 0x8386
 (LIMITED_PRESCALER: 0xc182). The CH341 12000 values were derived by hand from
 `ch341_get_divisor`; if the source says otherwise, the source wins and spec + tests are

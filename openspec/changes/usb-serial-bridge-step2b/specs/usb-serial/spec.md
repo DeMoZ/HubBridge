@@ -64,7 +64,7 @@ prescaler and divisor of 48 MHz. Rates outside the chip's range SHALL be refused
 
 #### Scenario: High-speed FTDI divisors
 - **WHEN** an FT232H port is set to 3000000 and 12000000 baud
-- **THEN** SET_BAUD_RATE carries value/index 0x0004/0x0200 and 0x0000/0x0200
+- **THEN** SET_BAUD_RATE carries value/index 0x0004/0x0201 and 0x0000/0x0201
 
 #### Scenario: Second port of an FT2232H
 - **WHEN** port B (interface 1) of an FT2232H is set to 115200 baud
