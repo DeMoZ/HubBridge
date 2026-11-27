@@ -10,7 +10,8 @@
 - [x] Wi-Fi/LAN (dual-stack listen) and ADB-only (localhost) modes; `hubbridge adb`
       sets up/reuses `adb forward`.
 - [x] Host CLI: `discover`, `pair`, `info`, `devices [--json]`, `grant`, `ping`, `watch`
-      (events + RTT + reconnect), `agents`, `forget`.
+      (events + RTT + reconnect), `agents`, `forget`, `install-apk` (install/update the
+      app on a USB-connected phone and open it).
 - [x] Descriptor parser, simulator with fake CP2102 + HID keyboard, unit + e2e tests, CI.
 
 Acceptance on hardware: phone + hub + CP2102/CH340 adapter → `hubbridge devices` shows the
@@ -55,6 +56,11 @@ adapter with its endpoints over Wi-Fi and over `adb forward`; unplugging it show
   RTT/loss/throughput.
 - Tray app (tao + wry + tray-icon): agents, devices with attach/detach toggles, RTT/link
   graph, logs; keys in Keychain / Credential Manager.
+- **"Install on phone" button** in the desktop app: lists phones from `adb devices -l`,
+  installs/updates the bundled APK and opens it (`hubbridge_host::install::install`,
+  already behind `hubbridge install-apk`). Desktop release archives ship `HubBridge.apk`
+  next to the executable (macOS: `Contents/Resources`); later, download the matching APK
+  from the GitHub release when it is not bundled.
 - Structured logs on both ends with export; diagnostic bundle.
 - Android: battery-optimization exemption flow, Quick Settings tile, "keep screen on" mode,
   PIN-less pairing over ADB (the host pushes a one-time secret with `adb shell`).

@@ -35,6 +35,8 @@ cargo run -p hubbridge-host -- watch
 
 1. `cd android && ./gradlew installDebug` (нужны Android SDK, JDK 17+, `cargo-ndk` и
    Android-таргеты Rust — см. README.md).
+   Или, если телефон подключён по USB с включённой отладкой: `hubbridge install-apk` —
+   поставит APK из поставки рядом с программой или собранный в этом репозитории.
 2. На телефоне: HubBridge → **Start: Wi-Fi/LAN + ADB** → **Pair a new computer**.
 3. На компьютере: `hubbridge discover`, `hubbridge pair <имя или IP> --pin <PIN>`,
    `hubbridge devices`, `hubbridge watch`. По кабелю: `hubbridge pair adb --pin <PIN>`.

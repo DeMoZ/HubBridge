@@ -99,7 +99,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     }
 
     private fun startAgent(lan: Boolean) {
-        val name = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL
+        val name = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)?.trim()?.ifEmpty { null } ?: Build.MODEL
         val version = try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
         } catch (_: PackageManager.NameNotFoundException) {

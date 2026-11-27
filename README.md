@@ -58,6 +58,9 @@ cargo run -p hubbridge-host -- watch                     # add --churn 3 to the 
    Needs the Android SDK (`ANDROID_HOME` or `android/local.properties`), JDK 17+ and
    NDK 27: `sdkmanager "ndk;27.2.12479018"`.
 
+   Or with the phone on USB (debugging on): `hubbridge install-apk` — takes the bundled
+   `HubBridge.apk`, or the APK built in this checkout.
+
 2. On the phone: open HubBridge → **Start: Wi-Fi/LAN + ADB** → **Pair a new computer**.
 3. On the computer (same network):
 
@@ -83,6 +86,7 @@ cargo run -p hubbridge-host -- watch                     # add --churn 3 to the 
 | `hubbridge grant <id> [target]` | show the USB permission dialog on the phone |
 | `hubbridge ping [target] -c N` | RTT min/avg/max/jitter through the encrypted session |
 | `hubbridge watch [target]` | live device changes and RTT, reconnects on drops |
+| `hubbridge install-apk [--serial S] [--apk F]` | install/update the app on a USB-connected phone and open it |
 | `hubbridge adb [--serial S]` | set up `adb forward`, print the local address |
 | `hubbridge agents` / `forget <agent>` | paired agents |
 

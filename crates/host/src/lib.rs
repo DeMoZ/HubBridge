@@ -8,6 +8,7 @@ pub mod adb;
 pub mod client;
 pub mod discovery;
 pub mod format;
+pub mod install;
 pub mod store;
 
 use std::net::{IpAddr, SocketAddr};
@@ -67,7 +68,7 @@ pub async fn resolve(target: Option<&str>, store: &Store) -> Result<Vec<SocketAd
     for a in discovery::discover(RESOLVE_BROWSE).await? {
         let by_id =
             !a.agent_id.is_empty() && (a.agent_id.starts_with(&q) || paired.is_some_and(|(id, _)| *id == a.agent_id));
-        if by_id || a.name.to_lowercase() == q {
+        if by_id || a.name.trim().to_lowercase() == q {
             addrs.extend(a.addrs);
         }
     }

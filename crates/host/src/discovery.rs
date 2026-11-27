@@ -44,7 +44,8 @@ fn discover_blocking(timeout: Duration) -> Result<Vec<DiscoveredAgent>> {
                 agent_id: info.get_property_val_str("id").unwrap_or_default().to_string(),
                 name: info
                     .get_property_val_str("name")
-                    .map(str::to_string)
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
                     .unwrap_or(instance),
                 addrs,
                 proto_version: info.get_property_val_str("v").and_then(|v| v.parse().ok()),

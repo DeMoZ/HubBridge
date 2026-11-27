@@ -112,7 +112,7 @@ impl Client {
             store.data.agents.insert(
                 session.agent_id.clone(),
                 PairedAgent {
-                    name: session.agent_name.clone(),
+                    name: session.agent_name.trim().to_string(),
                     key,
                     last_addr: None,
                     paired_at_ms: now_ms(),
@@ -120,7 +120,7 @@ impl Client {
             );
         }
         if let Some(a) = store.data.agents.get_mut(&session.agent_id) {
-            a.name = session.agent_name.clone();
+            a.name = session.agent_name.trim().to_string();
             if !addr.ip().is_loopback() {
                 a.last_addr = Some(addr.to_string());
             }
@@ -155,7 +155,7 @@ impl Client {
 
         Ok(Client {
             agent_id: session.agent_id,
-            agent_name: session.agent_name,
+            agent_name: session.agent_name.trim().to_string(),
             addr,
             writer: tokio::sync::Mutex::new(session.sender),
             pending,
