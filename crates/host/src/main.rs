@@ -81,10 +81,141 @@ enum Cmd {
         #[arg(long)]
         replace_incompatible: bool,
     },
+    /// Talk to a USB device on the phone (open, control and bulk transfers).
+    Usb {
+        #[command(subcommand)]
+        cmd: UsbCmd,
+    },
     /// List paired agents.
     Agents,
     /// Forget a paired agent (also remove this computer in the phone app).
     Forget { agent: String },
+}
+
+#[derive(Subcommand)]
+enum UsbCmd {
+    /// Read the descriptors live from the device with control transfers.
+    Descriptors {
+        /// Device id from `hubbridge devices`.
+        id: u32,
+        target: Option<String>,
+    },
+    /// USB flash drive / card reader: identify it, show capacity, optionally measure read speed.
+    /// The phone stops using the drive while HubBridge has it (it is unmounted there).
+    Storage {
+        id: u32,
+        target: Option<String>,
+        /// Read this many MiB from the start of the drive and report the speed.
+        #[arg(long)]
+        bench: Option<u64>,
+        /// KiB per USB transfer in the data phase (all in flight together).
+        #[arg(long, default_value_t = 64)]
+        chunk_kib: u32,
+        /// KiB per SCSI READ(10) command.
+        #[arg(long, default_value_t = 1024)]
+        command_kib: u32,
+    },
+}
+
+async fn device_info(c: &Client, id: u32) -> Result<hubbridge_proto::UsbDeviceInfo> {
+    match c.list_devices().await?.into_iter().find(|d| d.id == id) {
+        Some(d) => Ok(d),
+        None => bail!("no device {id} on {} (see `hubbridge devices`)", c.agent_name),
+    }
+}
+
+fn permission_hint(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<hubbridge_host::client::AgentError>() {
+        Some(a) if a.code == hubbridge_proto::ErrorCode::NoPermission => {
+            e.context("no USB permission on the phone: run `hubbridge grant <id>` and tap Allow")
+        }
+        _ => e,
+    }
+}
+
+async fn usb(cmd: UsbCmd, store: &mut Store) -> Result<()> {
+    match cmd {
+        UsbCmd::Descriptors { id, target } => {
+            let c = connect(target.as_deref(), store).await?;
+            let info = device_info(&c, id).await?;
+            c.open_device(id).await.map_err(permission_hint)?;
+            let res = hubbridge_host::msc::read_descriptors(&c, id).await;
+            let _ = c.close_device(id).await;
+            let (raw, strings) = res?;
+            let mut live = info.clone();
+            live.raw_descriptors = Some(raw.clone());
+            live.apply_raw_descriptors()
+                .map_err(|e| anyhow::anyhow!("descriptors from the device: {e}"))?;
+            print!("{}", format::device(&live));
+            for (i, s) in strings {
+                println!("    string {i}: {s:?}");
+            }
+            let same = info.raw_descriptors.as_deref() == Some(raw.as_slice());
+            println!(
+                "{} bytes read live; {}",
+                raw.len(),
+                if same {
+                    "identical to what Android reported"
+                } else {
+                    "Android's cached copy differs or is missing"
+                }
+            );
+            c.close().await;
+        }
+        UsbCmd::Storage {
+            id,
+            target,
+            bench,
+            chunk_kib,
+            command_kib,
+        } => {
+            let c = connect(target.as_deref(), store).await?;
+            let info = device_info(&c, id).await?;
+            let mut ms = hubbridge_host::msc::MassStorage::open(&c, &info)
+                .await
+                .map_err(permission_hint)?;
+            ms.chunk = chunk_kib.clamp(1, 1024) * 1024;
+            let res = async {
+                let inq = ms.inquiry().await?;
+                println!(
+                    "{} {} rev {}{}",
+                    inq.vendor,
+                    inq.product,
+                    inq.revision,
+                    if inq.removable { " (removable)" } else { "" }
+                );
+                let cap = ms.read_capacity().await?;
+                println!(
+                    "capacity {:.2} GB ({} blocks of {} bytes)",
+                    cap.bytes() as f64 / 1e9,
+                    cap.blocks,
+                    cap.block_size
+                );
+                if let Some(mib) = bench {
+                    let r = ms
+                        .bench(cap, mib * 1024 * 1024, Some(command_kib.max(1) * 1024))
+                        .await?;
+                    println!(
+                        "read {:.1} MiB in {:.2} s: {:.1} MB/s over {}",
+                        r.bytes as f64 / 1048576.0,
+                        r.elapsed.as_secs_f64(),
+                        r.mb_per_s(),
+                        if c.addr.ip().is_loopback() {
+                            "ADB / localhost"
+                        } else {
+                            "Wi-Fi/LAN"
+                        }
+                    );
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let _ = ms.close().await;
+            c.close().await;
+            res?;
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -242,6 +373,7 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("Opened on the phone: tap Start, then Pair a new computer.");
             }
         }
+        Cmd::Usb { cmd } => usb(cmd, &mut store).await?,
         Cmd::Agents => {
             if store.data.agents.is_empty() {
                 println!("No paired agents. Host id {}.", short(&store.data.host_id));

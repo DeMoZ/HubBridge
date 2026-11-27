@@ -7,7 +7,12 @@
 //! The same listener serves Wi-Fi/LAN clients and `adb forward` clients (those arrive
 //! from 127.0.0.1 on the phone). Both must authenticate the same way.
 
-use std::collections::BTreeMap;
+pub mod fake;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub mod nusb_backend;
+pub mod usb;
+
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +25,9 @@ use hubbridge_proto::{AgentInfo, ErrorCode, Frame, HelloError, Intent, Message, 
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
+use usb::{BoxFut, UsbBackend, UsbDevice, UsbError, timeout_from_ms};
 
 /// How long a PIN shown on the phone stays valid.
 pub const PAIRING_TTL: Duration = Duration::from_secs(120);
@@ -112,6 +118,14 @@ struct Inner {
     next_session: AtomicU64,
     callbacks: RwLock<Option<Arc<dyn AgentCallbacks>>>,
     shutdown: watch::Sender<bool>,
+    usb: RwLock<Option<Arc<dyn UsbBackend>>>,
+    /// Devices open for a session: device id → owner.
+    open: Mutex<HashMap<u32, OpenDev>>,
+}
+
+struct OpenDev {
+    session: u64,
+    dev: Arc<dyn UsbDevice>,
 }
 
 /// Cheap to clone; all clones share one agent.
@@ -186,8 +200,28 @@ impl Agent {
                 next_session: AtomicU64::new(1),
                 callbacks: RwLock::new(None),
                 shutdown,
+                usb: RwLock::new(None),
+                open: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Where USB devices are opened (Android: usbfs through nusb; simulator: fakes).
+    pub fn set_usb_backend(&self, backend: Arc<dyn UsbBackend>) {
+        *self.inner.usb.write().unwrap() = Some(backend);
+    }
+
+    /// Close a device opened by a host and tell hosts why.
+    fn close_open(&self, id: u32, reason: &str) {
+        let removed = self.inner.open.lock().unwrap().remove(&id);
+        if let Some(o) = removed {
+            o.dev.close();
+            info!(device = id, session = o.session, reason, "device closed");
+            let _ = self.inner.events.send(Message::DeviceClosed {
+                id,
+                reason: reason.to_string(),
+            });
+        }
     }
 
     pub fn set_callbacks(&self, cb: Arc<dyn AgentCallbacks>) {
@@ -275,6 +309,9 @@ impl Agent {
             *cur = new;
         }
         for e in events {
+            if let Message::DeviceRemoved { id } = &e {
+                self.close_open(*id, "unplugged");
+            }
             let _ = self.inner.events.send(e);
         }
         self.notify_status();
@@ -446,8 +483,20 @@ impl Agent {
         self.notify_status();
         info!(%peer, host = %host_name, session = sid, "session open");
 
-        let res = self.run_session(session.sender, session.receiver).await;
+        let res = self.run_session(sid, session.sender, session.receiver).await;
 
+        let mine: Vec<u32> = self
+            .inner
+            .open
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, o)| o.session == sid)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in mine {
+            self.close_open(id, "session ended");
+        }
         self.inner.sessions.lock().unwrap().remove(&sid);
         self.notify_status();
         info!(%peer, session = sid, "session closed");
@@ -456,6 +505,7 @@ impl Agent {
 
     async fn run_session<R, W>(
         &self,
+        sid: u64,
         mut tx: hubbridge_link::SecureSender<W>,
         rx: hubbridge_link::SecureReceiver<R>,
     ) -> Result<(), LinkError>
@@ -477,6 +527,9 @@ impl Agent {
         });
         let mut events = self.inner.events.subscribe();
         let mut stop = self.inner.shutdown.subscribe();
+        // USB requests finish later; their answers come back through this channel.
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+        let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
 
         let result = loop {
             tokio::select! {
@@ -491,11 +544,29 @@ impl Agent {
                         Ok(Some(Err(e))) => break Err(e),
                         Ok(Some(Ok(f))) => f,
                     };
-                    match self.respond(frame) {
-                        Some(reply) => tx.send(&reply).await?,
-                        None => break Ok(()),
+                    match self.dispatch(sid, frame) {
+                        Dispatch::Reply(reply) => tx.send(&reply).await?,
+                        Dispatch::Later(req, fut) => {
+                            // Back-pressure: at most MAX_IN_FLIGHT requests pending per session.
+                            let permit = Arc::clone(&in_flight).acquire_owned().await.expect("semaphore open");
+                            let out = out_tx.clone();
+                            tokio::spawn(async move {
+                                // A panic in a backend must still answer the host.
+                                let msg = match tokio::spawn(fut).await {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        warn!("USB request failed inside the agent: {e}");
+                                        Message::Error { code: ErrorCode::Internal, message: format!("agent error: {e}") }
+                                    }
+                                };
+                                let _ = out.send(Frame { req, msg });
+                                drop(permit);
+                            });
+                        }
+                        Dispatch::Bye => break Ok(()),
                     }
                 }
+                Some(done) = out_rx.recv() => tx.send(&done).await?,
                 ev = events.recv() => {
                     let msg = match ev {
                         Ok(m) => m,
@@ -512,10 +583,24 @@ impl Agent {
         result
     }
 
-    /// Answer one request. `None` means the host said goodbye.
-    fn respond(&self, frame: Frame) -> Option<Frame> {
+    /// Answer one request now, or queue it (USB) and answer when it completes.
+    fn dispatch(&self, sid: u64, frame: Frame) -> Dispatch {
         let req = frame.req;
         let msg = match frame.msg {
+            m @ (Message::OpenDevice { .. }
+            | Message::CloseDevice { .. }
+            | Message::ClaimInterface { .. }
+            | Message::ReleaseInterface { .. }
+            | Message::SetAlternate { .. }
+            | Message::Control { .. }
+            | Message::Transfer { .. }
+            | Message::ClearHalt { .. }
+            | Message::ResetDevice { .. }) => {
+                return match self.usb_request(sid, m) {
+                    Ok(fut) => Dispatch::Later(req, fut),
+                    Err(msg) => Dispatch::Reply(Frame { req, msg }),
+                };
+            }
             Message::Ping { seq, sent_us } => Message::Pong { seq, sent_us },
             Message::GetAgentInfo => Message::AgentInfo(self.info()),
             Message::ListDevices => Message::DeviceList {
@@ -534,12 +619,183 @@ impl Agent {
                     }
                 }
             }
-            Message::Bye => return None,
+            Message::Bye => return Dispatch::Bye,
             other => Message::Error {
                 code: ErrorCode::Unsupported,
                 message: format!("unexpected message {:?}", std::mem::discriminant(&other)),
             },
         };
-        Some(Frame { req, msg })
+        Dispatch::Reply(Frame { req, msg })
+    }
+
+    /// Synchronous part of a USB request (checks, queueing in order); the future does the rest.
+    // The error is the reply itself; boxing it would only add an allocation per request.
+    #[allow(clippy::result_large_err)]
+    fn usb_request(&self, sid: u64, msg: Message) -> Result<BoxFut<Message>, Message> {
+        let err = |code, message: String| Message::Error { code, message };
+
+        if let Message::OpenDevice { id } = msg {
+            if !self.inner.devices.read().unwrap().contains_key(&id) {
+                return Err(err(ErrorCode::UnknownDevice, format!("no device {id}")));
+            }
+            match self.inner.open.lock().unwrap().get(&id) {
+                Some(o) if o.session == sid => return Err(Message::Done),
+                Some(_) => return Err(err(ErrorCode::Busy, "another computer has this device open".into())),
+                None => {}
+            }
+            let Some(backend) = self.inner.usb.read().unwrap().clone() else {
+                return Err(err(ErrorCode::Unsupported, "this agent has no USB backend".into()));
+            };
+            let agent = self.clone();
+            return Ok(Box::pin(async move {
+                match backend.open(id).await {
+                    Ok(dev) => {
+                        let mut open = agent.inner.open.lock().unwrap();
+                        if open.contains_key(&id) {
+                            dev.close();
+                            return Message::Error {
+                                code: ErrorCode::Busy,
+                                message: "opened by another computer".into(),
+                            };
+                        }
+                        open.insert(id, OpenDev { session: sid, dev });
+                        info!(device = id, session = sid, "device opened");
+                        Message::Done
+                    }
+                    Err(e) => usb_err(e),
+                }
+            }));
+        }
+
+        let id = match &msg {
+            Message::CloseDevice { id }
+            | Message::ClaimInterface { id, .. }
+            | Message::ReleaseInterface { id, .. }
+            | Message::SetAlternate { id, .. }
+            | Message::Control { id, .. }
+            | Message::Transfer { id, .. }
+            | Message::ClearHalt { id, .. }
+            | Message::ResetDevice { id } => *id,
+            _ => return Err(err(ErrorCode::Internal, "not a USB request".into())),
+        };
+        let dev = match self.inner.open.lock().unwrap().get(&id) {
+            Some(o) if o.session == sid => Arc::clone(&o.dev),
+            _ => {
+                return Err(err(
+                    ErrorCode::NotOpen,
+                    format!("device {id} is not open in this session"),
+                ));
+            }
+        };
+        let fut: BoxFut<Message> = match msg {
+            Message::CloseDevice { .. } => {
+                self.inner.open.lock().unwrap().remove(&id);
+                dev.close();
+                Box::pin(async { Message::Done })
+            }
+            Message::ClaimInterface {
+                interface,
+                detach_kernel_driver,
+                ..
+            } => {
+                let f = dev.claim(interface, detach_kernel_driver);
+                Box::pin(async move { done(f.await) })
+            }
+            Message::ReleaseInterface { interface, .. } => {
+                let f = dev.release(interface);
+                Box::pin(async move { done(f.await) })
+            }
+            Message::SetAlternate {
+                interface, alternate, ..
+            } => {
+                let f = dev.set_alternate(interface, alternate);
+                Box::pin(async move { done(f.await) })
+            }
+            Message::Control {
+                setup,
+                data,
+                timeout_ms,
+                ..
+            } => {
+                let f = dev.control(setup, data, timeout_from_ms(timeout_ms));
+                Box::pin(async move {
+                    let r = f.await;
+                    Message::ControlDone {
+                        status: r.status,
+                        data: r.data,
+                    }
+                })
+            }
+            Message::Transfer {
+                endpoint,
+                length,
+                data,
+                timeout_ms,
+                ..
+            } => {
+                if length > usb::MAX_TRANSFER || data.len() > usb::MAX_TRANSFER as usize {
+                    return Err(err(
+                        ErrorCode::Unsupported,
+                        format!("transfers are limited to {} bytes", usb::MAX_TRANSFER),
+                    ));
+                }
+                let f = dev.transfer(endpoint, length, data, timeout_from_ms(timeout_ms));
+                Box::pin(async move {
+                    let r = f.await;
+                    Message::TransferDone {
+                        status: r.status,
+                        data: r.data,
+                        actual: r.actual,
+                    }
+                })
+            }
+            Message::ClearHalt { endpoint, .. } => {
+                let f = dev.clear_halt(endpoint);
+                Box::pin(async move { done(f.await) })
+            }
+            Message::ResetDevice { .. } => {
+                let f = dev.reset();
+                Box::pin(async move { done(f.await) })
+            }
+            _ => unreachable!(),
+        };
+        Ok(fut)
     }
 }
+
+fn usb_err(e: UsbError) -> Message {
+    match e {
+        UsbError::NoPermission(m) => Message::Error {
+            code: ErrorCode::NoPermission,
+            message: m,
+        },
+        UsbError::NotFound => Message::Error {
+            code: ErrorCode::UnknownDevice,
+            message: "device not found".into(),
+        },
+        UsbError::NotClaimed(m) => Message::Error {
+            code: ErrorCode::NotOpen,
+            message: m,
+        },
+        UsbError::Failed(m) => Message::Error {
+            code: ErrorCode::UsbFailed,
+            message: m,
+        },
+    }
+}
+
+fn done(r: Result<(), UsbError>) -> Message {
+    match r {
+        Ok(()) => Message::Done,
+        Err(e) => usb_err(e),
+    }
+}
+
+enum Dispatch {
+    Reply(Frame),
+    Later(u32, BoxFut<Message>),
+    Bye,
+}
+
+/// Pending USB requests per session before the agent stops reading new ones.
+pub const MAX_IN_FLIGHT: usize = 256;

@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -21,6 +22,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
 
@@ -38,6 +40,8 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var running = false
+    /** Connections opened for hosts, by device id. */
+    private val connections = ConcurrentHashMap<Int, UsbDeviceConnection>()
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -188,6 +192,26 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         main.post { notifyChanged() }
     }
 
+    override fun onOpenDevice(deviceId: Int): Int {
+        val usb = getSystemService(UsbManager::class.java) ?: return -3
+        val dev = scanner.find(deviceId) ?: return -2
+        if (!usb.hasPermission(dev)) return -1
+        connections.remove(deviceId)?.close()
+        val conn = usb.openDevice(dev) ?: return -3
+        connections[deviceId] = conn
+        Log.i(TAG, "opened ${dev.deviceName} for a host")
+        return conn.fileDescriptor
+    }
+
+    override fun onCloseDevice(deviceId: Int) {
+        connections.remove(deviceId)?.let {
+            it.close()
+            Log.i(TAG, "closed device $deviceId")
+        }
+        // The kernel driver may re-attach (e.g. a flash drive is mounted again): rescan.
+        pushDevices()
+    }
+
     // --- UI / notification ---------------------------------------------------------------
 
     private fun notifyChanged() {
@@ -232,6 +256,8 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         instance = null
         running = false
         unregisterReceiver(usbReceiver)
+        for (c in connections.values) c.close()
+        connections.clear()
         nsd.unregister()
         NativeAgent.stop()
         wakeLock?.release()

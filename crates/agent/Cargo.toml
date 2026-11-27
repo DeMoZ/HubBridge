@@ -20,3 +20,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
+
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+# `tokio`: nusb runs its blocking syscalls (open, claim) on tokio's blocking pool; without a
+# runtime feature awaiting them panics.
+nusb = { version = "0.2", features = ["tokio"] }

@@ -88,7 +88,26 @@ in `watch`.
 
 - New `Message` variants are only appended (postcard encodes the variant index).
 - Incompatible changes bump `PROTO_VERSION`; the agent answers `VersionMismatch`.
-- Step 2 adds `OpenDevice`, `ClaimInterface`, `ControlTransfer`, `SubmitUrb`/`UrbComplete`
-  (bulk/interrupt/iso), `ResetDevice`, `CloseDevice`, with payloads carried as raw bytes
-  after the header to avoid copies; step 3 adds `OpenVideo`/`VideoConfig` on the control
-  stream and a separate media connection.
+- Step 3 adds `OpenVideo`/`VideoConfig` on the control stream and a separate media
+  connection.
+
+## USB data (step 2)
+
+| Request (host → agent) | Reply | Notes |
+|---|---|---|
+| `OpenDevice {id}` | `Done` | exclusive: `Busy` if another session has it; `NoPermission` until the user allows USB access on the phone |
+| `CloseDevice {id}` | `Done` | also automatic when the session ends |
+| `ClaimInterface {id, interface, detach_kernel_driver}` | `Done` | detaching takes the interface from the phone's own driver (a flash drive is unmounted, a keyboard stops typing on the phone) |
+| `ReleaseInterface {id, interface}`, `SetAlternate {id, interface, alternate}` | `Done` | |
+| `Control {id, setup, data, timeout_ms}` | `ControlDone {status, data}` | direction from `setup.request_type` bit 7 |
+| `Transfer {id, endpoint, length, data, timeout_ms}` | `TransferDone {status, data, actual}` | bulk/interrupt; IN reads up to `length`, OUT sends `data`; ≤ 1 MiB |
+| `ClearHalt {id, endpoint}`, `ResetDevice {id}` | `Done` | |
+
+- `status`: `Ok`, `Stall`, `Cancelled` (also timeout), `Disconnected`, `Fault`,
+  `InvalidArgument`, `Unknown` — a transfer that ran but failed is a `*Done` with that
+  status; a request that could not run is an `Error {code}` (`NotOpen`, `UsbFailed`...).
+- Ordering: requests are queued in the order they arrive, so a host may keep many
+  transfers in flight on one endpoint (the mass-storage client keeps a whole `READ(10)` data
+  phase in flight) and they complete in order. The agent stops reading new requests while
+  256 are pending in a session.
+- Event `DeviceClosed {id, reason}` when the agent closes an open device (unplugged).
