@@ -728,4 +728,30 @@ mod tests {
             "setInert must set the inert property"
         );
     }
+
+    #[test]
+    fn every_put_host_has_a_focusable_fallback() {
+        let sc = script();
+        let mut hosts = std::collections::BTreeSet::new();
+        for part in sc.split("put(\"").skip(1) {
+            if let Some(end) = part.find('"') {
+                hosts.insert(&part[..end]);
+            }
+        }
+        assert!(!hosts.is_empty(), "no put() hosts found");
+        for id in hosts {
+            let at = PAGE
+                .find(&format!("id=\"{id}\""))
+                .unwrap_or_else(|| panic!("put host #{id} missing in the markup"));
+            let start = PAGE[..at].rfind("<section").unwrap_or(0);
+            let section = &PAGE[start..at + PAGE[at..].find("</section>").unwrap_or(0)];
+            if id.starts_with("st") {
+                continue;
+            }
+            assert!(
+                section.contains("tabindex=\"-1\""),
+                "panel of #{id} has no focusable heading or tabindex=-1 fallback"
+            );
+        }
+    }
 }

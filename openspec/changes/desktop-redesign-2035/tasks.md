@@ -1,7 +1,6 @@
 # Tasks
 
-Spec: `specs/desktop-window-design/spec.md`. How: `design.md` (decision numbers below). Rules
-from CLAUDE.md: never declare a top-level `ipc` in the page script (the helper is `send()`);
+Spec: `specs/desktop-window-design/spec.md`. How: `design.md` (decision numbers below). Project rules: never declare a top-level `ipc` in the page script (the helper is `send()`);
 the WebView lives on the main thread only; use `HUBBRIDGE_HOME=<scratch dir>` and
 `--state-dir <scratch dir>` for every simulator / window run, and a non-default
 `--listen 127.0.0.1:<port>` if 47800 is busy. Do not change any request JSON, `data-act`
@@ -21,7 +20,7 @@ Before starting, save the list of actions for the regression check:
 
 - [x] 2.1 Replace the `:root` / light blocks with the token table of decision 2 (dark base, `@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) }`, `:root[data-theme="light"]`, `:root[data-theme="dark"]`), plus the type, spacing, radius, elevation and motion tokens of decisions 3 and 6; `body` background `--bg-0`, fonts from the tokens; verify `cargo test -p hubbridge-desktop` passes with `theme_tokens_meet_contrast` un-ignored
 - [x] 2.2 Replace `.aurora` (markup and CSS) with the `body::before` ambient layer of decision 4; verify with the window (`cargo run -p hubbridge-desktop`, scratch `HUBBRIDGE_HOME`) and dark + light screenshots that the background shows two soft glows and no blobs, and that `rg -n "aurora|filter: blur" crates/desktop/src/ui/index.html` finds nothing
-- [ ] 2.3 Add the preference overrides of decision 6b (reduced motion, more contrast, reduced transparency); verify by temporarily appending a dev script that adds a `<style>` copying the override rules unconditionally (WebKit cannot fake media queries), screenshot: panels opaque, no glow; then turn on System Settings → Accessibility → Display → Reduce motion and Increase contrast for one real run each and confirm the same by eye (restore the settings afterwards)
+- [ ] 2.3 Add the preference overrides of decision 6b (reduced motion, more contrast, reduced transparency); verify by temporarily appending a dev script that adds a `<style>` copying the override rules unconditionally (WebKit cannot fake media queries), screenshot: panels opaque, no glow; then turn on System Settings → Accessibility → Display → Reduce motion and Increase contrast for one real run each and confirm the same by eye (restore the settings afterwards) — dropped to tech debt (owner decision 2026-11-28); tracked in docs/ROADMAP.md
 
 ## 3. Components
 

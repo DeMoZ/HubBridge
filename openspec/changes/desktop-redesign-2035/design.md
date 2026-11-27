@@ -6,7 +6,7 @@
   strings, render functions), compiled in with `include_str!`; `/*PLATFORM*/` is replaced with
   `macos` or `windows` and the body gets `platform-<name>`. Rust pushes the whole `Model` as
   JSON through `window.onState`, toasts through `window.onToast`; the page sends requests with
-  `send({action: …})`. CLAUDE.md: never declare a top-level `ipc` (wry owns `window.ipc`;
+  `send({action: …})`. Project rule: never declare a top-level `ipc` (wry owns `window.ipc`;
   WebKit would reject the whole script and show an empty window).
 - WebViews: WKWebView (macOS system WebKit) and WebView2 (Chromium). Both support CSS custom
   properties, `color-mix()`, `backdrop-filter` (WebKit also needs `-webkit-backdrop-filter`),

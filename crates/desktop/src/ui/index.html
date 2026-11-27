@@ -189,8 +189,10 @@ button.pill:hover { background: var(--surface-2); color: var(--text-1); }
 @keyframes breathe { 50% { opacity: .35; } }
 
 .main { display: grid; grid-template-columns: minmax(320px, 360px) 1fr; gap: var(--sp-4); padding: var(--sp-2) var(--sp-5) var(--sp-5); min-height: 0; }
-/* inline padding + matching negative margin: the panel shadow reaches into the padding instead of being clipped */
-.col { min-height: 0; min-width: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--sp-4); padding: 0 14px var(--sp-2); margin: 0 -14px; }
+/* inline padding + matching negative margin: the panel shadow reaches into the padding instead of being clipped; the facing sides take half the gap so the columns do not overlap */
+.col { min-height: 0; min-width: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--sp-4); padding: 0 14px var(--sp-5); margin: 0 -14px; }
+.col:first-child { padding-right: calc(var(--sp-4) / 2); margin-right: calc(var(--sp-4) / -2); }
+.col:last-child { padding-left: calc(var(--sp-4) / 2); margin-left: calc(var(--sp-4) / -2); }
 .col::-webkit-scrollbar { width: 8px; } .col::-webkit-scrollbar-thumb { background: var(--edge-strong); border-radius: 8px; }
 
 .panel { background: var(--surface-1); border: var(--border-w) solid var(--edge); border-radius: var(--r-panel); padding: var(--sp-5); box-shadow: inset 0 1px 0 var(--spec), var(--elev-1); backdrop-filter: blur(28px) saturate(150%); -webkit-backdrop-filter: blur(28px) saturate(150%); }
@@ -385,7 +387,7 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
       </section>
     </div>
     <div class="col">
-      <section class="panel" id="conn"></section>
+      <section class="panel" id="conn" tabindex="-1"></section>
       <section class="panel">
         <div class="ph"><h2 tabindex="-1" data-t="usb"></h2><span class="count num" id="devCount"></span></div>
         <div id="devices"></div>
@@ -492,12 +494,14 @@ let M = null;
 const expanded = new Set();
 const rendered = {};
 // A selector that finds `el` again after a re-render: its id, or its data-* attributes.
+const FOCUS_KEYS = ["act", "kind", "value", "id", "serial", "key", "text"];
 function focusSel(el) {
   if (el.id) return "#" + el.id;
-  const d = Object.entries(el.dataset || {});
+  const d = Object.entries(el.dataset || {}).filter(([k]) => FOCUS_KEYS.includes(k));
   if (!d.length) return null;
-  return el.tagName.toLowerCase() + d.map(([k, v]) => `[data-${k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase())}="${String(v).replace(/["\\]/g, "\\$&")}"]`).join("");
+  return el.tagName.toLowerCase() + d.map(([k, v]) => `[data-${k}="${String(v).replace(/["\\]/g, "\\$&")}"]`).join("");
 }
+const headingOf = (panel) => panel.querySelector("h2") || panel;
 // Re-rendering replaces the markup; keep the keyboard focus on the same control (or the panel heading).
 function put(id, html) {
   if (rendered[id] === html) return;
@@ -508,7 +512,8 @@ function put(id, html) {
   if (sel) {
     let n = null;
     try { n = host.querySelector(sel); } catch (e) {}
-    (n || (host.closest(".panel") || host).querySelector("h2") || document.body).focus();
+    if (n && !n.disabled) { n.focus(); if (document.activeElement === n) return; }
+    headingOf(host.closest(".panel") || host).focus();
   }
 }
 
@@ -777,13 +782,13 @@ function closeSheet(id) {
   // The opener may have been re-rendered meanwhile: find its twin, else the panel heading.
   let n = o.el.isConnected ? o.el : null;
   if (!n && o.sel) { try { n = document.querySelector(o.sel); } catch (e) {} }
-  if (!n && o.panel) n = o.panel.querySelector("h2");
+  if (!n && o.panel) n = headingOf(o.panel);
   if (n && n.focus) n.focus();
 }
 document.addEventListener("keydown", (e) => {
   const open = document.querySelectorAll(".modal.open");
   if (!open.length) return;
-  if (e.key === "Escape") { for (const m of open) closeSheet(m.id); return; }
+  if (e.key === "Escape") { closeSheet(open[open.length - 1].id); return; }
   if (e.key !== "Tab") return;
   // Fallback for the `inert` page: always step through the topmost sheet's focusables ourselves,
   // because WebKit's own Tab skips buttons.

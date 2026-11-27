@@ -73,7 +73,9 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
       cable once" after a phone restart), wireless-debugging pairing by code.
 - [x] Redesign "Ambient Glass": dark and light themes following the system, one accent,
       link island in the top bar, AA text contrast (guarded by a test), keyboard focus, reduced
-      motion / contrast / transparency, new app icon (`crates/desktop/assets`).
+      motion / contrast / transparency overrides implemented, new app icon (`crates/desktop/assets`).
+- [ ] Verify reduced motion / increased contrast overrides with the real macOS settings (tech debt
+      from the redesign).
 - [ ] Android control screen in the desktop's visual language (a new view layer; the launcher
       icon already uses the new mark).
 - [ ] Tray icon, launch at login, `.app` / installer packaging (macOS needs

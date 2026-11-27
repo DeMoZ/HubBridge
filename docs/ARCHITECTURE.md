@@ -83,7 +83,8 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
   elevation and duration is a token in the page's `:root` blocks, colors as literals. Dark is the
   base `:root`; the light set is written twice (the `prefers-color-scheme: light` media query and
   `:root[data-theme="light"]`) and the increased-contrast / reduced-transparency opaque overrides
-  likewise. Tests in `src/main.rs` keep the copies equal, check WCAG contrast of the real surface
+  likewise (the reduced-transparency overrides take effect in WebView2 on Windows only; macOS WebKit
+  has no `prefers-reduced-transparency`, so the page relies on `prefers-contrast: more`, Increase contrast). Tests in `src/main.rs` keep the copies equal, check WCAG contrast of the real surface
   stacks (text on cards, chips, buttons, placeholders), allow only plain tokens as text colors, and
   guard that the page declares no top-level `ipc` and loads nothing from the network.
 - `data-theme` on `<html>` forces a theme: `HUBBRIDGE_DEV_SCRIPT="document.documentElement.dataset.theme='light'"`
