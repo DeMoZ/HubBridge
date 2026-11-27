@@ -31,8 +31,7 @@
   the slave; `tcsetattr` on the slave accepts arbitrary speeds (12345, 250000, 921600,
   3000000); `IOSSIOSPEED` and `TIOCMGET` on the slave fail with `ENOTTY`; with `TIOCPKT` on
   the master, a slave `tcsetattr` produces **no** packet, a `tcflush(TCIOFLUSH)` produces
-  `0x03` (FLUSHREAD | FLUSHWRITE). On Linux the master has its own termios, so only the
-  slave's termios is authoritative.
+  `0x03` (FLUSHREAD | FLUSHWRITE).
 - Roman's only hardware is a Chameleon Ultra, checked on the Mac on 2026-11-27: Proxgrind
   `6868:8686`, product "ChameleonUltra_ hw_v1_ fw_v515", USB 2.0 Full Speed, composite
   CDC-ACM (interface 0 class 2/2/1, interface 1 class 10). GET_APP_VERSION request
@@ -46,8 +45,8 @@
 **Goals:**
 - All chip logic on the desktop, unit-testable with literal request vectors taken from the
   Linux drivers; the agent stays chip-agnostic.
-- PTY (unix) and TCP / RFC 2217 (all platforms) front ends over one port core.
-- CI coverage of every driver through fakes on macOS, Windows and Linux.
+- PTY (macOS only) and TCP / RFC 2217 (macOS and Windows) front ends over one port core.
+- CI coverage of every driver through fakes on macOS and Windows (there is no Linux platform).
 
 **Non-Goals:**
 - Windows virtual COM port (needs a signed driver such as com0com).
@@ -257,21 +256,20 @@ modem status (an RFC 2217 client whose modem-state mask is non-zero); PTY and ra
 ask (a PTY cannot show modem lines: `TIOCMGET` fails). Changes become `PortEvent::Modem`;
 line errors (CDC bits 4–6, FTDI OE/PE/FE/BI) become `PortEvent::LineError` and counters.
 
-### 9. PTY front end (macOS and Linux)
+### 9. PTY front end (macOS only)
 
-- `rustix` (features `pty`, `termios`, `fs`; unix-only dependency): `openpt(RDWR | NOCTTY)`,
+- `rustix` (features `pty`, `termios`, `fs`; macOS-only dependency): `openpt(RDWR | NOCTTY)`,
   `grantpt`, `unlockpt`, `ptsname`; open the slave once and **keep that fd** for the bridge's
   lifetime (the master never sees hang-up when the app closes, the app can reopen, and the
-  slave termios is readable on Linux too); `make_raw()` on it.
+  slave termios stays readable); `make_raw()` on it.
 - Master I/O through `tokio::io::unix::AsyncFd` with `O_NONBLOCK` (kqueue on the pty master
-  works — measured). `TIOCPKT` on the master via `libc::ioctl` (unix-only `libc`
+  works — measured). `TIOCPKT` on the master via `libc::ioctl` (macOS-only `libc`
   dependency): data packets start with `TIOCPKT_DATA` (0, stripped); `FLUSHREAD` /
   `FLUSHWRITE` become purges of RX / TX.
 - Termios watcher: `tcgetattr` on the held slave fd every 100 ms **and** before forwarding
-  each chunk read from the master; a change of speed, CSIZE, PARENB/PARODD/CMSPAR, CSTOPB or
+  each chunk read from the master; a change of speed, CSIZE, PARENB/PARODD, CSTOPB or
   CRTSCTS becomes a line change applied (decision 5) before that chunk goes out. Speeds are
-  read as numbers (`rustix` uses `termios2` on Linux; macOS `speed_t` is the rate itself),
-  so 250000 works on macOS. `--lock-line` disables the watcher.
+  read as numbers (macOS `speed_t` is the rate itself), so 250000 works. `--lock-line` disables the watcher.
 - Facts for users (LIMITATIONS): apps that set rates above 230400 through `IOSSIOSPEED`
   (pyserial on macOS) get `ENOTTY` on a PTY — use `--baud N --lock-line`, or RFC 2217; DTR/RTS
   toggling (esptool auto-reset) is impossible on a PTY — use RFC 2217

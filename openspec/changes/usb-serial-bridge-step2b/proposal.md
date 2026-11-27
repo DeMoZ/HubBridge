@@ -6,7 +6,7 @@ Step 2a gives the desktop host generic USB transfers to devices on the phone's h
 nothing on the desktop uses them yet except the mass-storage test client. USB-UART adapters
 and boards with a native USB serial port (MCU boards, the Chameleon Ultra RFID tool) are the
 first useful thing to bridge: they need no OS driver on the desktop, macOS can show them as a
-pseudo-terminal, and any OS can reach them over TCP / RFC 2217 (Windows has no driver-free
+pseudo-terminal, and macOS and Windows can reach them over TCP / RFC 2217 (Windows has no driver-free
 virtual COM port). This is ROADMAP step 2, item 3.
 
 ## What Changes
@@ -25,7 +25,7 @@ virtual COM port). This is ROADMAP step 2, item 3.
   for UART chips at high baud rates over Wi-Fi are documented, and a generic agent-side IN
   stream is sketched as a possible follow-up (design.md, decision 1).
 - **Front ends on the desktop:**
-  - a pseudo-terminal on macOS (and Linux, for the CLI) — `/dev/ttysNNN`; settings the
+  - a pseudo-terminal on macOS only — `/dev/ttysNNN`; settings the
     application makes on it (baud, parity, data and stop bits, RTS/CTS) are applied to the
     chip; `tcflush` purges;
   - a TCP port, raw or RFC 2217 (telnet COM-PORT-OPTION: baud, data size, parity, stop size,

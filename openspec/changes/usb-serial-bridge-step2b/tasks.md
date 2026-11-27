@@ -122,6 +122,18 @@ Skipped nits: CP2105 SCI limits (second port of a CP2105 is limited to 921600), 
 - [x] 12.5 TCP accept loop survives transient accept errors (log, wait 100 ms, go on); verify a unit test of the error classification
 - [x] 12.6 CH34x: unexpected quirk-probe status fails the open (as Linux does), no duplicate warning, a short read is an error; verify host e2e tests for a limited chip (divisor encoding) and for the unexpected-status path; correction note on 11.11
 
+## 13. No Linux platform
+
+HubBridge has no Linux platform: desktop is macOS and Windows, USB devices live on the Android phone. References to Linux kernel driver sources as the reference for chip protocols stay, as do `*-linux-android` target triples and the ubuntu runner of the APK job.
+
+- [x] 13.1 CI: Rust matrix is macOS and Windows only, no EXCLUDE logic, `cargo fmt --all --check` on macOS; verify `.github/workflows/ci.yml` has no `ubuntu` outside the APK job
+- [x] 13.2 Repo rules: `CLAUDE.md` says macOS and Windows desktop, Android phone, no Linux code, CI or releases; `openspec/config.yaml` has a real `context:`; verify by reading both
+- [x] 13.3 Agent and Android code: `cfg(any(target_os = "android", target_os = "linux"))` becomes `target_os = "android"`, comments say Android; verify `cargo ndk ... clippy` and `./gradlew assembleDebug`
+- [x] 13.4 Desktop and host small items: no "linux" platform string in the window, no Linux udev hint in `adb.rs`, descriptor docs say Android usbfs; verify `git grep`
+- [x] 13.5 PTY is macOS only: module, dependencies, bridge, CLI, window and tests use `cfg(target_os = "macos")`; all Linux and Android branches deleted (termios2, stick parity, the Linux merge); verify clippy and tests on macOS, no PTY code compiled elsewhere (cfg review, Windows CI)
+- [x] 13.6 Docs and OpenSpec artifacts: ARCHITECTURE, LIMITATIONS (no Linux column), ROADMAP, proposal, design and both delta specs say PTY on macOS, TCP and RFC 2217 on Windows; verify `git grep -n -i -E 'linux|ubuntu'` shows only the kept categories
+- [x] 13.7 Gates: fmt, clippy, tests, Android clippy, APK, `serial_e2e` five times
+
 ## Workflow follow-up
 
 - Review round (Opus) against the specs; fixes go back to a Sonnet executor.

@@ -171,7 +171,7 @@ struct SerialArgs {
     /// Which port of a multi-port device (FTDI, dual CDC); 0 is the first.
     #[arg(long, default_value_t = 0)]
     port: usize,
-    /// Serve a pseudo-terminal (macOS, Linux; the default there without --tcp).
+    /// Serve a pseudo-terminal (macOS only; the default there without --tcp).
     #[arg(long)]
     pty: bool,
     /// Serve TCP on this port (127.0.0.1) or address:port.
@@ -250,12 +250,12 @@ async fn serial(a: SerialArgs, store: &mut Store) -> Result<()> {
         bail!("--rfc2217 needs --tcp");
     }
     // PTY by default where there is one and nothing else was asked for.
-    let pty = a.pty || (cfg!(unix) && tcp_addr.is_none() && !measuring);
-    if !measuring && pty && !cfg!(unix) {
+    let pty = a.pty || (cfg!(target_os = "macos") && tcp_addr.is_none() && !measuring);
+    if !measuring && pty && !cfg!(target_os = "macos") {
         bail!("a pseudo-terminal is not available on this platform: use --tcp PORT (with --rfc2217 for line control)");
     }
     if !measuring && !pty && tcp_addr.is_none() {
-        bail!("nothing to serve: use --pty (macOS, Linux) or --tcp PORT");
+        bail!("nothing to serve: use --pty (macOS) or --tcp PORT");
     }
     let config = SerialConfig {
         line: Line {

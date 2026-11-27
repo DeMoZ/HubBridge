@@ -39,7 +39,7 @@ pub struct Model {
     pub serial_capable: Vec<SerialCapable>,
     /// Serial bridges, running or stopped (with the reason).
     pub serial: Vec<SerialView>,
-    /// A PTY can be offered (macOS, Linux).
+    /// A PTY can be offered (macOS).
     pub pty_supported: bool,
     /// Running actions, e.g. "install:R28M303RHET", "pair", "wifi:R28M303RHET".
     pub busy: BTreeSet<String>,
@@ -340,7 +340,7 @@ impl App {
             push,
             model: Mutex::new(Model {
                 version: env!("CARGO_PKG_VERSION"),
-                pty_supported: cfg!(unix),
+                pty_supported: cfg!(target_os = "macos"),
                 ..Default::default()
             }),
             store: tokio::sync::Mutex::new(store),
@@ -772,7 +772,7 @@ impl App {
                 flow: Flow::None,
                 ..SerialConfig::default()
             },
-            pty: pty && cfg!(unix),
+            pty: pty && cfg!(target_os = "macos"),
             tcp: tcp_port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
             rfc2217,
             ..BridgeOptions::default()

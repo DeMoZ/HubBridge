@@ -1,4 +1,4 @@
-//! Real USB on Android (and Linux) through `nusb` on a usbfs file descriptor.
+//! Real USB on Android through `nusb` on a usbfs file descriptor.
 //!
 //! Android gives the app an fd for each device it opened with
 //! `UsbManager.openDevice()`; the platform layer passes a duplicate here. Each endpoint gets

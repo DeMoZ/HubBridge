@@ -16,14 +16,14 @@ use super::tcp::{TcpFront, TcpOptions};
 use super::{Flow, Line, SerialConfig, Stats};
 use crate::Client;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use super::pty::{PtyFront, PtyOptions};
 
 #[derive(Debug, Clone)]
 pub struct BridgeOptions {
     pub config: SerialConfig,
     pub port: PortOptions,
-    /// A pseudo-terminal (macOS, Linux).
+    /// A pseudo-terminal (macOS).
     pub pty: bool,
     /// Listen for TCP clients here.
     pub tcp: Option<SocketAddr>,
@@ -33,7 +33,7 @@ pub struct BridgeOptions {
     pub lock_line: bool,
 }
 
-// Not derivable: the PTY is on by default only where there is one (`cfg!(unix)`), and clippy
+// Not derivable: the PTY is on by default only where there is one (`cfg!(target_os = "macos")`), and clippy
 // on Windows sees that as the plain `false` default.
 #[allow(clippy::derivable_impls)]
 impl Default for BridgeOptions {
@@ -41,7 +41,7 @@ impl Default for BridgeOptions {
         BridgeOptions {
             config: SerialConfig::default(),
             port: PortOptions::default(),
-            pty: cfg!(unix),
+            pty: cfg!(target_os = "macos"),
             tcp: None,
             rfc2217: false,
             lock_line: false,
@@ -69,7 +69,7 @@ pub struct SerialBridge;
 
 pub struct BridgeHandle {
     port: SerialPort,
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     pty: Option<PtyFront>,
     tcp: Option<TcpFront>,
     rfc2217: bool,
@@ -80,7 +80,7 @@ pub struct BridgeHandle {
 impl SerialBridge {
     /// Open the device and start the front ends. The device is closed again on failure.
     pub async fn start(client: Arc<Client>, info: &UsbDeviceInfo, opts: BridgeOptions) -> Result<BridgeHandle> {
-        if opts.pty && !cfg!(unix) {
+        if opts.pty && !cfg!(target_os = "macos") {
             bail!("a pseudo-terminal is not available on this platform: use --tcp (with --rfc2217 for line control)");
         }
         if !opts.pty && opts.tcp.is_none() {
@@ -88,7 +88,7 @@ impl SerialBridge {
         }
         let port = SerialPort::open(client, info, opts.config, opts.port.clone()).await?;
         let label = format!("{} {}", info.label(), port.info().label);
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         let pty = if opts.pty {
             match PtyFront::start(
                 port.clone(),
@@ -120,7 +120,7 @@ impl SerialBridge {
                 {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        #[cfg(unix)]
+                        #[cfg(target_os = "macos")]
                         if let Some(p) = &pty {
                             p.stop();
                         }
@@ -135,18 +135,18 @@ impl SerialBridge {
         // or a front end whose listener or terminal failed.
         let supervisor = {
             let port = port.clone();
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
             let pty_ended = pty.as_ref().map(|p| p.ended());
             let tcp_ended = tcp.as_ref().map(|t| t.ended());
             tokio::spawn(async move {
-                #[cfg(unix)]
+                #[cfg(target_os = "macos")]
                 let pty_end = async {
                     match pty_ended {
                         Some(f) => f.await,
                         None => std::future::pending().await,
                     }
                 };
-                #[cfg(not(unix))]
+                #[cfg(not(target_os = "macos"))]
                 let pty_end = std::future::pending::<()>();
                 let tcp_end = async {
                     match tcp_ended {
@@ -164,7 +164,7 @@ impl SerialBridge {
         };
         Ok(BridgeHandle {
             port,
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
             pty,
             tcp,
             rfc2217: opts.rfc2217,
@@ -180,9 +180,9 @@ impl BridgeHandle {
 
     pub fn info(&self) -> BridgeInfo {
         let p: PortInfo = self.port.info();
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         let pty_path = self.pty.as_ref().map(|p| p.path().to_string());
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "macos"))]
         let pty_path = None;
         BridgeInfo {
             driver: p.driver,
@@ -208,7 +208,7 @@ impl BridgeHandle {
 
     /// Stop the front ends; the bridge then ends and closes the port by itself.
     pub fn stop_fronts(&self) {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         if let Some(p) = &self.pty {
             p.stop();
         }
@@ -226,7 +226,7 @@ impl BridgeHandle {
 
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         if let Some(p) = &self.pty {
             p.stop();
         }

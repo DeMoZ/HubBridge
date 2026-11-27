@@ -13,7 +13,7 @@ pub mod cp210x;
 pub mod detect;
 pub mod ftdi;
 pub mod port;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub mod pty;
 pub mod rfc2217;
 pub mod tcp;

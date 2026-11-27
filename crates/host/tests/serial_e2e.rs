@@ -811,7 +811,7 @@ async fn consumer_that_does_not_read_loses_bytes_beyond_the_buffer() {
 
 // --- 6.2 / 6.3 pseudo-terminal front end -----------------------------------------------------
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod pty {
     use std::os::fd::OwnedFd;
 
@@ -914,10 +914,7 @@ mod pty {
         e.usb.clear_serial_log(CP2102);
         let mut t = tcgetattr(&app).unwrap();
         t.set_speed(57_600).unwrap();
-        #[cfg(target_os = "macos")]
-        {
-            t.control_modes |= rustix::termios::ControlModes::PARENB;
-        }
+        t.control_modes |= rustix::termios::ControlModes::PARENB;
         tcsetattr(&app, OptionalActions::Now, &t).unwrap();
         app_write(&app, b"x");
         wait_for(|| {
@@ -933,53 +930,18 @@ mod pty {
             .iter()
             .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x1e))
             .expect("baud change logged");
-        #[cfg(target_os = "macos")]
         let line = log
             .iter()
             .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x03))
             .expect("line control logged");
-        assert!(baud < out, "baud change before the data: {log:?}");
+        assert!(baud < out && line < out, "line change before the data: {log:?}");
         let d = e.usb.serial_state(CP2102);
-        assert_eq!(d.baud, 57_600);
-        // The Linux kernel forces 8 data bits and no parity on a PTY (pty_set_termios), so the
-        // format can only be changed through a PTY on macOS.
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(d.parity, 2, "even parity");
-            assert!(line < out, "line control before the data: {log:?}");
-        }
+        assert_eq!((d.baud, d.parity), (57_600, 2), "even parity");
         assert_eq!(p.line().baud, 57_600);
         pty.stop();
         p.close().await;
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn linux_speed_change_keeps_the_ports_data_bits_and_parity() {
-        let e = env().await;
-        let cfg = SerialConfig {
-            line: Line {
-                baud: 115_200,
-                data_bits: 7,
-                parity: Parity::Even,
-                stop_bits: StopBits::One,
-            },
-            ..SerialConfig::default()
-        };
-        let p = e.open_with(CP2102, cfg, PortOptions::default()).await;
-        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
-        let app = open_slave(pty.path());
-        let mut t = tcgetattr(&app).unwrap();
-        t.set_speed(57_600).unwrap();
-        tcsetattr(&app, OptionalActions::Now, &t).unwrap();
-        wait_for(|| e.usb.serial_state(CP2102).baud == 57_600).await;
-        let d = e.usb.serial_state(CP2102);
-        assert_eq!((d.data_bits, d.parity), (7, 2), "7E1 stays");
-        pty.stop();
-        p.close().await;
-    }
-
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn nonstandard_rate_reaches_the_chip() {
         let e = env().await;
@@ -1539,7 +1501,7 @@ mod net {
     async fn bridge_serves_pty_and_rfc2217_together_and_stop_gives_the_device_back() {
         let e = env().await;
         let opts = BridgeOptions {
-            pty: cfg!(unix),
+            pty: cfg!(target_os = "macos"),
             tcp: Some(LOCAL.parse().unwrap()),
             rfc2217: true,
             ..BridgeOptions::default()
@@ -1553,7 +1515,7 @@ mod net {
         let mut c = Rfc::connect(info.tcp_addr.unwrap()).await;
         c.s.write_all(b"tcp side").await.unwrap();
         assert_eq!(c.data(8).await, b"tcp side");
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         {
             let path = info.pty_path.clone().expect("a PTY path");
             let fd = rustix::fs::open(
@@ -1841,7 +1803,7 @@ mod review {
     #[tokio::test]
     async fn ch34x_open_fails_on_an_unexpected_probe_status_or_a_short_read() {
         let e = env().await;
-        // Any status but OK or STALL from the quirk probe fails the open, as in Linux.
+        // Any status but OK or STALL from the quirk probe fails the open, as the Linux ch341 driver does.
         e.usb.fail_control_request(CH340, Some((0x95, UsbStatus::Fault)));
         let err = SerialPort::open(
             Arc::clone(&e.client),

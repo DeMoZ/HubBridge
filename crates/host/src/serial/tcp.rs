@@ -120,7 +120,7 @@ pub fn accept_error_is_transient(e: &std::io::Error) -> bool {
     ) {
         return true;
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     if let Some(code) = e.raw_os_error() {
         // EMFILE / ENFILE (descriptors), ENOBUFS / ENOMEM (memory), ECONNABORTED, EPROTO.
         return matches!(
@@ -538,13 +538,13 @@ mod tests {
         ] {
             assert!(accept_error_is_transient(&Error::from(k)), "{k:?}");
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         for code in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ECONNABORTED] {
             assert!(accept_error_is_transient(&Error::from_raw_os_error(code)), "{code}");
         }
         assert!(!accept_error_is_transient(&Error::from(ErrorKind::PermissionDenied)));
         assert!(!accept_error_is_transient(&Error::from(ErrorKind::InvalidInput)));
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         assert!(!accept_error_is_transient(&Error::from_raw_os_error(libc::EBADF)));
     }
 

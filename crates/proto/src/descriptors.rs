@@ -1,7 +1,7 @@
 //! Parser for raw USB descriptors.
 //!
 //! Input is what Android `UsbDeviceConnection.getRawDescriptors()` (and a read of the
-//! Linux usbfs node) returns: the 18-byte device descriptor followed by every full
+//! Android usbfs node) returns: the 18-byte device descriptor followed by every full
 //! configuration descriptor (config + interface + endpoint + class-specific descriptors).
 
 use thiserror::Error;

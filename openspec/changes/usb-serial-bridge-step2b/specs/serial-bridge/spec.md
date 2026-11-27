@@ -3,20 +3,20 @@
 ## Purpose
 
 Makes a USB serial port on the phone usable by ordinary desktop applications: as a
-pseudo-terminal on macOS and Linux, as a raw or RFC 2217 TCP port on any platform, from the
+pseudo-terminal on macOS, as a raw or RFC 2217 TCP port on macOS and Windows, from the
 `hubbridge serial` command and from the desktop window, with built-in latency and
 throughput measurements.
 
 ## ADDED Requirements
 
 ### Requirement: Pseudo-terminal front end
-On macOS and Linux the bridge SHALL be able to expose the port as a pseudo-terminal in raw
+On macOS the bridge SHALL be able to expose the port as a pseudo-terminal in raw
 mode and print its device path; bytes written to it SHALL go to the device and bytes from
 the device SHALL be readable from it. An application closing and reopening it SHALL not
 stop the bridge.
 
 #### Scenario: Echo through the PTY
-- **WHEN** an application opens the printed `/dev/ttys…` path (Linux `/dev/pts/…`) of a bridge on a loopback device and writes "hello"
+- **WHEN** an application opens the printed `/dev/ttys…` path of a bridge on a loopback device and writes "hello"
 - **THEN** it reads "hello" back
 
 #### Scenario: Reopen
@@ -106,7 +106,7 @@ FLOWCONTROL-SUSPEND and FLOWCONTROL-RESUME.
 `hubbridge serial <id> [target]` SHALL open the device as a serial port with the line
 options given (`--baud`, `--data-bits`, `--parity`, `--stop-bits`, `--flow`, `--dtr`,
 `--rts`, `--port` for multi-port FTDI), start the chosen front ends (`--pty`, `--tcp`,
-`--rfc2217`; PTY by default on macOS and Linux), print where they are, and run until
+`--rfc2217`; PTY by default on macOS), print where they are, and run until
 Ctrl-C or until the device or session goes away.
 
 #### Scenario: Start with a PTY

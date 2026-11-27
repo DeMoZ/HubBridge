@@ -1,14 +1,11 @@
-//! Pseudo-terminal front end (macOS and Linux): the serial port as `/dev/ttysNNN`.
+//! Pseudo-terminal front end (macOS only): the serial port as `/dev/ttysNNN`.
 //!
 //! The master side is served here, the slave fd is **held open** for the bridge's lifetime:
 //! the master then never sees a hang-up when an application closes the slave, applications
-//! can reopen it, and the slave's termios stays readable (on Linux the master has its own).
+//! can reopen it, and the slave's termios stays readable.
 //! `TIOCPKT` mode on the master tells flushes (`tcflush`) apart from data. A watcher reads
 //! the slave's termios and turns changes of speed, size, parity, stop bits and RTS/CTS into
 //! line changes on the port, before the data the application wrote after the change.
-
-// `tcflag_t` is u64 on macOS and u32 on Linux: the casts to u64 are needed on one of them.
-#![allow(clippy::unnecessary_cast)]
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
@@ -58,37 +55,31 @@ pub struct Observed {
     pub flow: Flow,
 }
 
-fn bits(t: &Termios) -> u64 {
-    t.control_modes.bits() as u64
+fn bits(t: &Termios) -> libc::tcflag_t {
+    t.control_modes.bits()
 }
 
 /// The UART settings in a termios.
 pub fn observe(t: &Termios) -> Observed {
     let c = bits(t);
-    let has = |flag: libc::tcflag_t| c & (flag as u64) != 0;
-    let size = c & (libc::CSIZE as u64);
-    let data_bits = if size == libc::CS5 as u64 {
+    let has = |flag: libc::tcflag_t| c & flag != 0;
+    let size = c & libc::CSIZE;
+    let data_bits = if size == libc::CS5 {
         5
-    } else if size == libc::CS6 as u64 {
+    } else if size == libc::CS6 {
         6
-    } else if size == libc::CS7 as u64 {
+    } else if size == libc::CS7 {
         7
     } else {
         8
     };
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let stick = has(libc::CMSPAR);
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let stick = false;
+    // macOS has no stick (mark/space) parity: odd and even only.
     let parity = if !has(libc::PARENB) {
         Parity::None
+    } else if has(libc::PARODD) {
+        Parity::Odd
     } else {
-        match (stick, has(libc::PARODD)) {
-            (true, true) => Parity::Mark,
-            (true, false) => Parity::Space,
-            (false, true) => Parity::Odd,
-            (false, false) => Parity::Even,
-        }
+        Parity::Even
     };
     Observed {
         line: Line {
@@ -105,65 +96,30 @@ pub fn observe(t: &Termios) -> Observed {
     }
 }
 
-/// What a program asked for, as far as the kernel lets a PTY carry it. Linux forces 8 data
-/// bits and no parity on a PTY (`pty_set_termios` clears CSIZE/PARENB), so there the data
-/// bits and parity stay what the port has; speed, stop bits and flow control come from the
-/// termios.
-pub fn merge_observed(now: Observed, port_line: Line, kernel_forces_8n: bool) -> Observed {
-    if !kernel_forces_8n {
-        return now;
-    }
-    Observed {
-        line: Line {
-            data_bits: port_line.data_bits,
-            parity: port_line.parity,
-            ..now.line
-        },
-        flow: now.flow,
-    }
-}
-
-fn kernel_forces_8n() -> bool {
-    cfg!(any(target_os = "linux", target_os = "android"))
-}
-
-/// Raw mode with the UART settings of `obs`.
+/// Raw mode with the UART settings of `obs` (mark and space parity, which macOS cannot
+/// express, are set as odd and even).
 pub(crate) fn configure(t: &mut Termios, obs: &Observed) -> Result<()> {
     t.make_raw();
-    let mut c = bits(t)
-        & !(libc::CSIZE as u64
-            | libc::PARENB as u64
-            | libc::PARODD as u64
-            | libc::CSTOPB as u64
-            | libc::CRTSCTS as u64);
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        c &= !(libc::CMSPAR as u64);
-    }
+    let mut c = bits(t) & !(libc::CSIZE | libc::PARENB | libc::PARODD | libc::CSTOPB | libc::CRTSCTS);
     c |= match obs.line.data_bits {
         5 => libc::CS5,
         6 => libc::CS6,
         7 => libc::CS7,
         _ => libc::CS8,
-    } as u64;
+    };
     if obs.line.parity != Parity::None {
-        c |= libc::PARENB as u64;
+        c |= libc::PARENB;
         if matches!(obs.line.parity, Parity::Odd | Parity::Mark) {
-            c |= libc::PARODD as u64;
-        }
-        // Mark and space are "stick" parity: odd+stick is mark, even+stick is space.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        if matches!(obs.line.parity, Parity::Mark | Parity::Space) {
-            c |= libc::CMSPAR as u64;
+            c |= libc::PARODD;
         }
     }
     if obs.flow == Flow::RtsCts {
-        c |= libc::CRTSCTS as u64;
+        c |= libc::CRTSCTS;
     }
     if obs.line.stop_bits == StopBits::Two {
-        c |= libc::CSTOPB as u64;
+        c |= libc::CSTOPB;
     }
-    t.control_modes = ControlModes::from_bits_retain(c as _);
+    t.control_modes = ControlModes::from_bits_retain(c);
     t.set_speed(obs.line.baud)
         .map_err(|e| anyhow!("set the PTY speed to {}: {e}", obs.line.baud))?;
     Ok(())
@@ -200,7 +156,7 @@ impl PtyFront {
         let (end_tx, ended) = tokio::sync::watch::channel(false);
         let end_tx = Arc::new(end_tx);
         let (g1, g2) = (EndGuard(Arc::clone(&end_tx)), EndGuard(end_tx));
-        let observed = merge_observed(observe(&tcgetattr(&*slave)?), port.line(), kernel_forces_8n());
+        let observed = observe(&tcgetattr(&*slave)?);
         let reader = {
             let (afd, slave, port) = (Arc::clone(&afd), Arc::clone(&slave), port.clone());
             tokio::spawn(async move {
@@ -282,7 +238,7 @@ async fn write_master(afd: &AsyncFd<OwnedFd>, mut data: &[u8]) -> std::io::Resul
 /// Look at the slave's termios and apply a change to the port.
 async fn sync_line(slave: &OwnedFd, port: &SerialPort, last: &mut Observed) {
     let Ok(t) = tcgetattr(slave) else { return };
-    let now = merge_observed(observe(&t), port.line(), kernel_forces_8n());
+    let now = observe(&t);
     if now == *last {
         return;
     }
@@ -387,17 +343,12 @@ mod tests {
 
     #[test]
     fn configure_and_observe_round_trip() {
-        let mut cases = vec![
+        let cases = vec![
             obs(Parity::None, StopBits::One, 8, Flow::None, 115_200),
             obs(Parity::Even, StopBits::Two, 7, Flow::None, 9600),
             obs(Parity::Odd, StopBits::One, 6, Flow::RtsCts, 57_600),
             obs(Parity::None, StopBits::One, 5, Flow::RtsCts, 230_400),
         ];
-        // Stick parity exists on Linux only.
-        if cfg!(any(target_os = "linux", target_os = "android")) {
-            cases.push(obs(Parity::Mark, StopBits::One, 8, Flow::None, 9600));
-            cases.push(obs(Parity::Space, StopBits::Two, 8, Flow::RtsCts, 9600));
-        }
         for want in cases {
             // Start from a state that has everything set, to see that it gets cleared too.
             let mut t = fresh_termios();
@@ -405,25 +356,6 @@ mod tests {
             configure(&mut t, &want).unwrap();
             assert_eq!(observe(&t), want);
         }
-    }
-
-    #[test]
-    fn linux_keeps_data_bits_and_parity_of_the_port() {
-        let port_line = Line {
-            baud: 115_200,
-            data_bits: 7,
-            parity: Parity::Even,
-            stop_bits: StopBits::One,
-        };
-        // The kernel reports 8N1 at a new speed with stop bits 2 and RTS/CTS.
-        let seen = obs(Parity::None, StopBits::Two, 8, Flow::RtsCts, 57_600);
-        let merged = merge_observed(seen, port_line, true);
-        assert_eq!(merged.line.baud, 57_600);
-        assert_eq!(merged.line.stop_bits, StopBits::Two);
-        assert_eq!((merged.line.data_bits, merged.line.parity), (7, Parity::Even));
-        assert_eq!(merged.flow, Flow::RtsCts);
-        // Where the PTY carries everything (macOS) the observation is used as it is.
-        assert_eq!(merge_observed(seen, port_line, false), seen);
     }
 
     #[test]
