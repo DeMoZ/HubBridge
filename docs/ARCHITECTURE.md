@@ -66,8 +66,7 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Step 1 front end is the `hubbridge` CLI (`discover`, `pair`, `info`, `devices`, `grant`,
   `ping`, `watch`, `adb`, `agents`, `forget`). Step 4 adds a tray app on tao + wry +
   tray-icon (same stack as UsbMemoryChecker / 360Cleaner), talking to the same library.
-- Targets macOS and Windows. The libraries and the CLI also build on Linux (CI runs their
-  tests there); no Linux builds of the window are made.
+- Targets macOS and Windows (the phone side is Android). There is no Linux platform.
 
 ### 3. OS integration layer (steps 2–3, design)
 
@@ -76,7 +75,6 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 1. **Generic: USB/IP.** The phone acts as the USB/IP *server* (exports the device; URBs are
    executed on usbfs). The host app opens a local USB/IP endpoint on `127.0.0.1:3240` and
    tunnels it over the encrypted HubBridge session, then attaches with the OS client:
-   - Linux: in-kernel `vhci-hcd` + `usbip attach` — works out of the box (good dev target);
    - Windows: [usbip-win2](https://github.com/vadimgrn/usbip-win2) — its recent releases ship
      attestation-signed drivers, so no test-signing mode is needed (older builds and forks
      needed it);
@@ -85,10 +83,17 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
      `com.apple.developer.usb.host-controller-interface`, granted only on request. Plan for
      macOS without it → class proxies below.
 2. **Class proxies** (no kernel driver, per device class):
-   - CDC-ACM / FTDI / CP210x / CH34x serial → the phone drives the chip (Rust port of the
-     vendor protocols, like `usb-serial-for-android`), the host exposes a pseudo-terminal
-     (macOS/Linux `openpty` → `/dev/ttysNNN`) or a virtual COM port on Windows (needs a signed
-     driver such as com0com) or simply a TCP serial port (RFC 2217);
+   - CDC-ACM / FTDI / CP210x / CH34x serial (built, step 2b) → the chip logic runs **on the
+     host** over the generic step 2a transfers (`crates/host/src/serial`): the encoders for
+     each chip are pure functions checked against the Linux drivers, the agent stays
+     chip-agnostic and needs no update per chip. The port core keeps several bulk IN
+     transfers in flight, writes OUT transfers in order and reads modem status from the
+     interrupt endpoint (CDC-ACM, CH34x), the in-band header (FTDI) or polling (CP210x). Front
+     ends: a pseudo-terminal (macOS `openpty` → `/dev/ttysNNN`), a raw TCP port and an
+     RFC 2217 TCP port (macOS and Windows; a Windows virtual COM port would need a signed driver
+     such as com0com and is not shipped). A planned *generic* agent-side IN stream (chip
+     agnostic, keeps IN transfers queued on the phone) is the option if UART adapters turn
+     out to lose bytes at high baud rates over Wi-Fi; see LIMITATIONS "Serial over Wi-Fi";
    - HID → report descriptors + interrupt IN reports forwarded; the host injects via a virtual
      HID device (macOS HIDDriverKit dext, DriverKit entitlements + user approval; Windows VHF
      driver or ViGEm-style gamepad driver) or, for keyboards/mice only, synthesized input
@@ -135,7 +140,7 @@ HubBridge/
 │   ├── link/                  record layer, SPAKE2 pairing, Noise sessions (tokio)
 │   ├── agent/                 agent core: server, pairing window, sessions, device registry
 │   ├── android/               JNI cdylib libhubbridge_android.so (built with cargo-ndk)
-│   ├── agent-sim/             desktop agent with fake devices (CP2102 UART, HID keyboard)
+│   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)
@@ -146,7 +151,7 @@ HubBridge/
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
 ├── docs/                      ARCHITECTURE, LIMITATIONS, PROTOCOL, ROADMAP
-└── .github/workflows/ci.yml   fmt, clippy, tests on macOS/Windows (+ libraries on Linux); APK
+└── .github/workflows/ci.yml   fmt, clippy, tests on macOS and Windows; APK
 ```
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`

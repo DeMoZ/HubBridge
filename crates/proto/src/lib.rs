@@ -5,7 +5,7 @@
 //! - the application messages carried inside the encrypted session ([`Frame`], [`Message`]);
 //! - the USB device model shared by the agent and the host ([`usb`]);
 //! - a parser for raw USB descriptors as Android's `UsbDeviceConnection.getRawDescriptors()`
-//!   and Linux usbfs return them ([`descriptors`]).
+//!   returns them ([`descriptors`]).
 //!
 //! Everything is encoded with `postcard` (compact, serde-based). See `docs/PROTOCOL.md`.
 

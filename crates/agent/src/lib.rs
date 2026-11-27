@@ -8,7 +8,7 @@
 //! from 127.0.0.1 on the phone). Both must authenticate the same way.
 
 pub mod fake;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(target_os = "android")]
 pub mod nusb_backend;
 pub mod usb;
 

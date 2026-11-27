@@ -59,13 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ipc_app = Arc::clone(&app);
     let drag_proxy = event_loop.create_proxy();
-    let platform = if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(windows) {
-        "windows"
-    } else {
-        "linux"
-    };
+    let platform = if cfg!(target_os = "macos") { "macos" } else { "windows" };
     let page = include_str!("ui/index.html").replace("/*PLATFORM*/", platform);
     let webview = WebViewBuilder::new()
         .with_html(page)

@@ -1,0 +1,151 @@
+# Tasks
+
+Specs: `specs/usb-serial/spec.md`, `specs/serial-bridge/spec.md`. How: `design.md` (decision
+numbers below refer to it). Rules from CLAUDE.md apply: append-only protocol (this change
+adds no messages), never print key files, use `HUBBRIDGE_HOME=<scratch>` and
+`--state-dir <scratch>` for every manual simulator run. Before writing a chip's code, open
+the Linux source named in design decision 3 and check the request codes and the literal
+vectors; if the source disagrees with a vector, the source wins and the spec + test are
+corrected in the same commit.
+
+## 1. Descriptor fixtures (`crates/proto/src/fixtures.rs`)
+
+- [x] 1.1 Add raw-descriptor fixtures and `UsbDeviceInfo` builders for FT232R, FT2232H (two interfaces), FT232H, CH340 (bulk + interrupt) exactly as listed in design decision 12; verify a new test in `crates/proto/src/descriptors.rs` parses each (VID/PID, bcdDevice, interface count, endpoint addresses, max packet sizes 64 / 512 / 32 / 8)
+- [x] 1.2 Add the three CDC-ACM fixtures (simple 1209:0001 with IAD + header/call-management/ACM/union descriptors; composite with two vendor interfaces before IAD at 2, control 2, data 3; no-union with control 0 and data 1); verify the parser test sees the right interface classes (02/02 and 0a) and still skips the class-specific descriptors, and `cargo test -p hubbridge-proto` passes
+
+## 2. Fake backend: generic fixes (`crates/agent/src/fake.rs`)
+
+- [x] 2.1 Build an endpoint → interface map from each fake's raw descriptors and check the claim of the owning interface (not interface 0) in `bulk()`; verify the existing e2e tests in `crates/host/tests/usb_e2e.rs` still pass and a new agent unit test shows a bulk transfer on interface 1's endpoint fails `InvalidArgument` until interface 1 is claimed
+- [x] 2.2 Serve waiting IN transfers per endpoint strictly in submission order, and when the front waiting transfer times out return `Cancelled` for every waiting transfer on that endpoint (as the nusb worker's `cancel_all`); verify with an agent unit test: three INs waiting, then 3 bytes written one at a time, each IN gets its byte in submission order; and a second test where the front IN's timeout cancels all three
+
+## 3. Fake serial chips (`crates/agent/src/fake/serial.rs`)
+
+- [x] 3.1 Add `FakeKind::Serial(SerialChip)` and the module skeleton: shared per-device state that survives reopen (`Arc<Mutex<..>>` in the `FakeEntry`), an ordered event log (`Control {setup, data}` and `Out {len}`), decoded state (baud, data bits, parity, stop bits, flow, DTR, RTS, break, purge count, enabled, latency timer), loopback buffer, and the test hooks `FakeUsb::serial_log(id)`, `set_modem(id, ModemLines)`, `inject_rx(id, bytes)`, `inject_line_error(id, LineErrorKind)`; unknown control requests stall; move the old catch-all "vendor OUT accepted" rule so it does not shadow serial chips; verify `cargo test -p hubbridge-agent` passes
+- [x] 3.2 CP210x emulation (AN571 / `cp210x.c` requests of design decision 3): IFC_ENABLE, SET_BAUDRATE, SET_LINE_CTL, SET_MHS, GET_MDMSTS, SET_FLOW, SET_BREAK, PURGE, GET_PARTNUM (configurable part number), GET_COMM_STATUS (overrun counter); OUT data is discarded until IFC_ENABLE(1), then looped back; verify an agent unit test drives the requests directly and checks the decoded state and that data written before IFC_ENABLE does not come back
+- [x] 3.3 FTDI emulation (`ftdi_sio.c`): RESET (purges), MODEM_CTRL, SET_FLOW_CTRL, SET_BAUD_RATE (decode the divisor back to a rate for the log, both 3 MHz and H-type encodings, index port byte checked), SET_DATA (incl. break bit), SET_LATENCY_TIMER; IN completions are packets of max-packet size each starting with the 2 status bytes (modem bits from `set_modem`, line bits from `inject_line_error`), a status-only packet after the latency timer when idle; verify an agent unit test: loop back 200 bytes on a 64-byte-packet fake and see 4 packets with headers, and an idle IN completes with exactly 2 bytes after ~16 ms
+- [x] 3.4 CH34x emulation (`ch341.c`): READ_VERSION (configurable, default 0x31), SERIAL_INIT, WRITE_REG for 0x1312 (decode divisor to a rate) / 0x2518 (LCR) / 0x1805 (break), READ_REG 0x0706 (modem, inverted) and 0x1805 (stalls when `limited_prescaler`), MODEM_CTRL (inverted); interrupt IN packet `[0, 0, !status, 0]` queued on `set_modem`; verify an agent unit test checks the decoded rate for 115200 and the interrupt packet content
+- [x] 3.5 CDC-ACM emulation (PSTN): SET_LINE_CODING / GET_LINE_CODING, SET_CONTROL_LINE_STATE, SEND_BREAK; SERIAL_STATE notifications (8-byte header + 2-byte bitmap, wIndex = control interface) on `set_modem` / `inject_line_error`; verify an agent unit test reads back the line coding it set and gets the notification `a1 20 00 00 00 00 02 00 03 00` after DCD + DSR on
+- [x] 3.6 Register the fakes in `crates/agent-sim/src/main.rs` with ids 1002 (CP210x, replacing the plain loopback), 1005 FT232R, 1006 FT2232H, 1007 FT232H, 1008 CH340, 1009 CDC-ACM, and add their `UsbDeviceInfo`s to the device list; update the simulator's module doc and the ARCHITECTURE.md repository-layout line for `agent-sim`; verify `hubbridge-agent-sim --pin 123456 --state-dir <scratch> --listen 127.0.0.1:<port>` + `HUBBRIDGE_HOME=<scratch> hubbridge devices 127.0.0.1:<port>` lists all of them
+- [x] 3.7 The fake is compiled into the Android library: verify `cargo ndk -t arm64-v8a -P 26 clippy -p hubbridge-android -p hubbridge-agent -- -D warnings` is clean (needs `ANDROID_NDK_HOME`)
+
+## 4. Host serial core: types, detection, chip encoders (`crates/host/src/serial/`)
+
+- [x] 4.1 Create the module layout of design decision 2 (`mod.rs` with `SerialConfig`, `Parity`, `StopBits`, `Flow`, `ModemStatus`, `LineErrors`, `Stats`, `PortEvent`; empty driver files) and `pub mod serial` in `lib.rs`; verify `cargo build -p hubbridge-host` and `cargo check -p hubbridge-host --target x86_64-pc-windows-msvc` (if the target is installed; otherwise CI) succeed (Windows `cargo check --target x86_64-pc-windows-msvc` cannot run on this Mac: the `ring` C build lacks MSVC headers; cfg hygiene kept, CI checks it.)
+- [x] 4.2 Detection (decision 4): VID/PID tables, CDC walk over `raw_descriptors` (IAD, union, call management, ACM capabilities, no-union fallback, alternate settings), class-based fallback without raw descriptors, `--port` selection, the "not a supported USB serial device" error; verify unit tests on every fixture from group 1 and `fixtures::flash_drive` / `hid_keyboard` (spec: Serial driver detection, all scenarios)
+- [x] 4.3 CDC-ACM encoders and parsers: line coding (7 bytes), control line state, send break, SERIAL_STATE parser; verify unit tests with the spec bytes (`00 c2 01 00 00 00 08`, value 0x0003, notification `a1 20 … 03 00` → DCD + DSR)
+- [x] 4.4 CP210x encoders: IFC_ENABLE, SET_BAUDRATE, SET_LINE_CTL, SET_MHS, SET_FLOW (16 bytes per `cp210x_set_flow_control`), SET_BREAK, PURGE, GET_MDMSTS / GET_COMM_STATUS parsers, per-part maximum rate from GET_PARTNUM; verify unit tests: 115200 8N1 → data `00 c2 01 00` + value 0x0800, 7E2 → 0x0722, CP2102 3000000 rejected naming 1000000, CP2102N 3000000 accepted
+- [x] 4.5 FTDI encoders: chip type from bcdDevice, both divisor functions, value/index with the port byte, SET_DATA, MODEM_CTRL, SET_FLOW_CTRL, latency timer, IN header splitter per max-packet chunk; verify unit tests with every vector in design decision 3 (FT232R 9600/115200/921600/3M, FT232H 3M/12M, FT2232H port B 115200), 7E1 → 0x0207, DTR off → 0x0100, 5 data bits reported as 8, 1024-byte transfer of two 512-byte packets → 1020 data bytes, status-only packets → no data **Deviation (Linux source wins):** `ftdi_determine_type` gives FT232H (and FT-X) channel `CHANNEL_A + ifnum` = 1, so the FT232H index low byte is 1: 3 M gives 0x0004/0x0201 and 12 M gives 0/0x0201 (design and spec corrected). Line-error bits are counted only on packets that carry data (as `ftdi_process_packet`), so status-only packets never report errors.
+- [x] 4.6 CH34x encoders: `ch341_get_divisor` port with the LIMITED_PRESCALER variant, bit 7 rule (version > 0x27), LCR (written only for version ≥ 0x30), modem control (inverted), interrupt status parser, break read-modify-write; verify unit tests: 115200 → 0xcc83, 9600 → 0xb282, 12000 → 0x8386 / 0xc182 with the quirk, version 0x27 → no bit 7 and no LCR write, 8N1 LCR → 0x00c3, DTR+RTS → 0xff9f, 45 and 3000001 baud rejected
+
+## 5. Host serial core: the port (`crates/host/src/serial/port.rs`)
+
+- [x] 5.1 `SerialPort::open(client: Arc<Client>, &UsbDeviceInfo, SerialConfig, PortOptions)`: detect, open, claim with detach, per-chip open sequence (CP210x IFC_ENABLE → baud → line → flow → MHS; FTDI reset → latency → baud → data → flow → modem; CH34x version → (quirk check) → SERIAL_INIT → divisor → LCR → modem; CDC line coding → control line state), all control requests strictly sequential (decision 5), close on any failure; `close()` drops DTR/RTS, CP210x IFC_ENABLE 0, releases, closes; verify e2e tests in new `crates/host/tests/serial_e2e.rs` (setup like `usb_e2e.rs` with all serial fakes) assert each chip's exact logged request sequence at 115200 8N1 (spec: Opening the port), "Open without DTR", and that after `close()` another `open_device` succeeds
+- [x] 5.2 IN pump (decision 6): K in flight, 16 KiB rounded to max packet, 60 s timeout (configurable for tests), pure reply-handling function, data kept from `Cancelled` replies, stall → clear halt, stop reasons, FTDI header stripping, 1 MiB delivery buffer with `rx_dropped`; verify a unit test of the reply-handling function covering every `UsbStatus` and the stop cases, and e2e tests: idle line with a 300 ms IN timeout then data still arrives (spec: Idle line), stalled IN recovered (spec: Stalled IN endpoint)
+- [x] 5.3 OUT writer (decision 7): queue, 4 in flight, 16 KiB coalescing, back-pressure, drain before line changes; verify e2e "Loopback round trip" (64 KiB patterned, exact order) for CP210x, FT232R, FT2232H port B, FT232H, CH340 and CDC-ACM, and that the fake's event log shows a line change only after all earlier OUT writes
+- [x] 5.4 Line changes, modem lines, break, purge as `SerialPort` methods returning the settings in effect; verify e2e tests: FTDI 7E1, CP210x RTS/CTS SET_FLOW, CH340 LCR, CH34x modem control, CDC break on/off (spec: Line format and flow control, Modem lines break and purge), purge clears the host buffer and logs the chip purge request where the chip has one
+- [x] 5.5 Modem status sources (decision 8) and line errors as `PortEvent`s: CDC and CH34x interrupt IN pump, FTDI headers, CP210x polling only while `want_modem_status(true)`; verify e2e tests: `set_modem` on CDC / CH340 / FTDI fakes produces the expected `PortEvent::Modem`, FTDI overrun counted, CP210x logs zero GET_MDMSTS without demand and several at 200 ms with demand
+- [x] 5.6 Counters and end of port: `Stats` (tx, rx, rx_dropped, overruns, parity, framing, breaks), `done()` future with the reason; verify e2e "Counters after a round trip" (1000/1000/0) and "Device unplugged": `agent.set_devices` without the device stops the port within 2 s with a "device closed" reason
+- [x] 5.7 Document the host-side driver decision in `docs/ARCHITECTURE.md` (OS integration layer: serial class proxy now runs on the host over the generic transfers; the "phone drives the chip" text replaced; planned generic agent IN stream mentioned as an option) and the UART high-baud limit with the numbers of design decision 1 in `docs/LIMITATIONS.md` (new subsection "Serial over Wi-Fi" + section 4 serial row); verify both docs name the supported chips and no longer claim drivers on the phone (`rg -n "phone drives the chip" docs` finds nothing)
+
+## 6. Front ends
+
+- [x] 6.1 Add `rustix` (features `pty`, `termios`, `fs`) and `libc` as `[target.'cfg(unix)'.dependencies]` of `hubbridge-host`; verify `cargo tree -p hubbridge-host --target x86_64-pc-windows-msvc` (or CI's Windows job) does not include them and macOS builds
+- [x] 6.2 PTY front end (`pty.rs`, `#[cfg(unix)]`, decision 9): openpt/grantpt/unlockpt/ptsname, held raw slave fd, `AsyncFd` master, `TIOCPKT` with data byte stripped and flushes → purges, wiring to the port's IN/OUT; verify `#[cfg(unix)]` e2e tests: echo "hello" through the PTY on the CP210x fake, close and reopen the PTY and echo again (spec: Pseudo-terminal front end), `tcflush(TCIFLUSH)` on the PTY logs a purge
+- [x] 6.3 Termios watcher (100 ms + before each forwarded chunk) and `--lock-line`; verify `#[cfg(unix)]` e2e tests: set 57600 + even parity on the slave then write → the fake's log shows the line change before that OUT data; `#[cfg(target_os = "macos")]` test: 250000 baud reaches the fake; lock-line test: 9600 set by the app, fake stays at 921600
+- [x] 6.4 Raw TCP front end (`tcp.rs`): default 127.0.0.1, bare-port parsing, warning on non-loopback, one client, `TCP_NODELAY`; verify e2e tests on all platforms: bytes 00..ff (incl. 0xff) round trip unchanged, a second client is closed while the first keeps working, `--tcp 7000`-style parsing gives 127.0.0.1:7000 (unit test)
+- [x] 6.5 RFC 2217 codec (`rfc2217.rs`, pure): telnet parser across read boundaries, IAC escaping both ways and inside SB, option negotiation without loops, every COM-PORT-OPTION command and reply of decision 10, NOTIFY encoders with masks; verify unit tests: SET-BAUDRATE bytes `ff fa 2c 01 00 01 c2 00 ff f0` parsed in 1-byte pieces, reply `ff fa 2c 65 00 01 c2 00 ff f0`, a baud value containing 0xff escaped, unknown option → DONT/WONT once, repeated DO not answered twice
+- [x] 6.6 RFC 2217 server: apply commands through the port and reply after the change, query without device request, SET-CONTROL DTR/RTS/break/flow, FLOWCONTROL-SUSPEND/RESUME, masks, NOTIFY-MODEMSTATE/LINESTATE from `PortEvent`s, CP210x modem polling while a client with a modem mask is connected, `--lock-line`; verify e2e tests with a small RFC 2217 client in the test file, one per scenario of spec "RFC 2217 front end" and "RFC 2217 notifications" (CDC fake for DCD, framing error masked out)
+- [x] 6.7 `SerialBridge` / `BridgeHandle` (`bridge.rs`, decision 11): starts port + chosen front ends, `info()` (driver, chip, line, PTY path, TCP address), `stats()`, `stop()`, `done()`; any end closes the port; verify e2e test: start a bridge with PTY (unix) and RFC 2217 at once, data through both directions, `stop()` closes the device on the agent
+- [x] 6.8 Document the PTY facts and front-end usage in `docs/LIMITATIONS.md` §4 (macOS: arbitrary rates via tcsetattr work, `IOSSIOSPEED`/`TIOCMGET` fail on a PTY → `--baud --lock-line` or RFC 2217; Windows: RFC 2217 clients such as pyserial / esptool, or com0com + hub4com for a COM port, not shipped); verify the serial row of the §4 table matches what is built
+
+## 7. CLI (`crates/host/src/main.rs`, `serial/bench.rs`, `format.rs`)
+
+- [x] 7.1 `hubbridge serial <id> [target]` with `--baud` (default 115200), `--data-bits`, `--parity`, `--stop-bits`, `--flow none|rtscts`, `--dtr on|off`, `--rts on|off`, `--port`, `--pty` (default on unix when no other front end), `--tcp <addr|port>`, `--rfc2217`, `--lock-line`, `--in-flight`, `--ftdi-latency-ms`; prints driver, chip, line, PTY path / TCP address; Ctrl-C closes cleanly; Windows without `--tcp` fails with the hint; permission hint as in `usb storage`; ping every 2 s while running; verify against the simulator (`HUBBRIDGE_HOME=<scratch>`): `hubbridge serial 1002 --baud 115200` prints CP210x / 115200 8N1 / the PTY path, `python3 -I` with only `os`/`termios` (or `screen`) echoes through it, Ctrl-C exits 0 and `hubbridge usb descriptors 1002` works right after
+- [x] 7.2 Keepalive and end conditions; verify manually against the simulator: the bridge idle for 60 s is still running (spec: Session kept alive), and stopping the simulator ends the command with a non-zero exit and the reason
+- [x] 7.3 `--bench-echo` (decision 13); verify an e2e test runs the bench function on the CP210x and FT232R fakes and gets 0 lost / 0 wrong bytes and non-empty percentiles, and `hubbridge serial 1002 --bench-echo` against the simulator prints latency, KB/s with % of line rate and "0 bytes lost"
+- [x] 7.4 `--bench-request <hex> (--reply-len | --reply-idle-ms) [--count] [--interval-ms] [--reply-timeout-ms]`; verify an e2e test on the loopback fake: request `0102` with `--reply-len 2` gives 2-byte replies `0102`, and `--reply-len 4` makes every round time out and be counted (spec: Request/response measurement)
+- [x] 7.5 `hubbridge devices` shows "serial: <driver> (<chip>)" for detected devices (`format::device`); verify against the simulator: 1002 shows "serial: CP210x", 1004 shows none, 1009 shows "serial: CDC-ACM"
+- [x] 7.6 Mark ROADMAP step 2 item 3 as built (host-side drivers, PTY + RFC 2217, fake-tested; hardware: CDC-ACM pending, UART adapters pending), keeping the 3 Mbaud UART test as an open item; verify the checklist matches what is built
+
+## 8. Desktop window (`crates/desktop`)
+
+- [x] 8.1 `Model`: `serial_capable`, `serial`, `pty_supported`; `Request`: `SerialStart {id, baud, pty, tcp_port, rfc2217}`, `SerialStop {id}` (decision 14); verify `cargo build -p hubbridge-desktop` and a unit test that the requests deserialize from `{"action":"serial_start",...}` / `{"action":"serial_stop","id":1002}`
+- [x] 8.2 Controller: bridges map, start/stop with toasts on errors, counters refreshed by the 1 s tick only while bridges run, stop on Disconnect / reconnect / `DeviceClosed` / `DeviceRemoved` with the reason shown; verify against the simulator with `HUBBRIDGE_DEV_SCRIPT` sending `serial_start` for 1002, then stopping the simulator: the card shows the bridge stopped with a reason
+- [x] 8.3 Page (`src/ui/index.html`): Serial row on serial-capable cards with permission (baud select + custom, PTY toggle hidden when `!pty_supported`, TCP port + RFC 2217 switch, Start/Stop, PTY path with copy, line, counters), en + ru strings, helper `send()` only (no top-level `ipc`); verify with the simulator, `HUBBRIDGE_HOME=<scratch>` and a window-only screenshot (CGWindowList id → `screencapture -l <id> -o -x shot.png`): the 1002 card shows the PTY path, "CP210x · 115200 8N1", counters growing while a script echoes through the PTY (Verified with the real window on macOS against the simulator: screenshots `scratchpad/shot2.png` shows PTY `/dev/ttys000`, `CP210x · 115200 8N1` and counters growing; `shot6.png` shows the reason after the simulator stopped. Deviation: when the whole connection drops the device cards disappear, so the stopped bridge's reason is shown in the devices panel instead of on a card; and on a Mac `target/debug/HubBridge` (window) and `target/debug/hubbridge` (CLI) are the same file on the case-insensitive filesystem: build one, copy it away, then build the other.)
+
+## 9. Integration gates
+
+- [x] 9.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass on macOS; after push verify the macOS and Windows CI jobs (PTY code compiled out on Windows, TCP/RFC 2217 tests run) are green (CI green on d84ef74: macOS, Windows and the APK job; the Linux job was removed by group 13)
+- [x] 9.2 Confirm the protocol is untouched: `git diff main -- crates/proto/src/lib.rs crates/link docs/PROTOCOL.md` shows no change (fixtures only in `crates/proto/src/fixtures.rs`); verify `PROTO_VERSION` is still 1
+- [x] 9.3 Re-run the Android checks after all agent changes: `cargo ndk -t arm64-v8a -P 26 clippy -p hubbridge-android -p hubbridge-agent -- -D warnings` and `cd android && ./gradlew assembleDebug` (`ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`, `JAVA_HOME=$(/usr/libexec/java_home -v 25)`); verify both succeed
+
+## 10. Hardware check (skipped by Roman's decision, 2026-11-27)
+
+- [x] 10.1 Install the rebuilt APK on the phone, start the service, connect over Wi-Fi; verify `hubbridge info` shows the new app version (APK installed on the phone over Wi-Fi ADB (done during the change))
+- [x] 10.8 Commit with the OpenSpec change, push the branch, open the PR; verify CI is green (PR #6 exists; CI green on macOS, Windows and the APK job)
+
+Deferred until a real USB-serial device is on the hub:
+
+- Plug the device into the hub; `hubbridge devices` lists it with "serial: ..."; `hubbridge grant <id>` and tap Allow; fix detection with a new fixture of its real descriptors if needed.
+- Send one harmless read-only request through `hubbridge serial <id> --bench-request` and check the bridged reply is byte-identical to a direct run.
+- Over Wi-Fi record p50/p95/max of the request/response latency next to `hubbridge ping` RTT.
+- Throughput with `--reply-idle-ms` on a read-only command that returns a lot of data, if the device has one.
+- Through the PTY and the desktop window: a stdlib-only Python script on the PTY path gets the reply, the window card shows the path and moving counters.
+- With a UART adapter and a TX-RX jumper: `--bench-echo` at 115200 and at high rates (CP2102 921600; CP2102N / FT232R / CH340 2000000 or 3000000; FT232H 3000000 and 12000000), also `--flow rtscts`; record the results in LIMITATIONS "Serial over Wi-Fi" and decide whether the generic agent IN stream is needed.
+
+## 11. Review round 1
+
+- [x] 11.1 CI (a): `BridgeOptions` default clean for clippy on Windows and unix; verify `cargo clippy --workspace --all-targets -- -D warnings` passes (Windows result: CI)
+- [x] 11.2 CI (b): PTY line-change test robust on Linux (the Linux kernel forces 8 data bits and no parity on a PTY, only the speed is honoured there); verify the test asserts the baud change before the data everywhere and the format only on macOS, and LIMITATIONS says so
+- [x] 11.3 Major 1: `close()` on a half-open session finishes within ~2 s (no shutdown requests once the session is fatal, no `close_device` after a fatal error, overall timeout); verify an e2e test that kills the transport and times `close()`
+- [x] 11.4 Major 2: RFC 2217 server uses DO/DONT for COM-PORT-OPTION (hello `DO 44`, answers client `WILL 44` with `DO 44`, still tolerates a client `DO 44`); verify codec unit tests and an e2e client that negotiates per the RFC
+- [x] 11.5 Major 3: failed or cancelled OUT transfers are counted (`tx_failed`), reported as a `PortEvent` and shown by the CLI and the window, partial `actual` counted, OUT timeout 60 s with RTS/CTS; verify an e2e test with a fake that fails an OUT
+- [x] 11.6 Minor 4: the bridge ends when a front end ends (TCP accept error, PTY read error); verify a unit/e2e test that kills a front end and sees `done()`
+- [x] 11.7 Minor 5: desktop reserves the device id before awaiting the start; a duplicate start is refused without touching the running view; verify a unit test of the reservation (The test found a real bug in the first version of the guard: a duplicate start released the first one's reservation.)
+- [x] 11.8 Minor 6: the page keeps updating counters while a field has focus; verify with the window (scripted focus) or a page-level check (Verified with the real window: a baud field focused on one card, counters of the running bridge kept growing, 6 300 then 15 600 bytes.)
+- [x] 11.9 Minor 7: PTY `configure` sets/clears CRTSCTS from the observed flow and CMSPAR for mark/space on Linux; verify a unit test of `configure`/`observe` round trip
+- [x] 11.10 Minor 8: `flow_block` clears AUTO_RECEIVE/AUTO_TRANSMIT; verify unit test (CP2102N E104 erratum noted only)
+- [x] 11.11 Minor 9: CH34x quirk detection reads register 0x0005 as `ch341_detect_quirks`; break read-modify-write keeps 0x1805; an unexpected status during detection is logged, not treated as "no quirk" silently; verify unit and e2e tests, fake updated **Correction (round 2):** an unexpected status during the probe keeps failing the open, as `ch341_detect_quirks` / `ch341_port_probe` do; the round-1 wording "not fail open" was wrong.
+- [x] 11.12 Minor 10: a permanently stalling IN endpoint stops the port with a reason after N stalls in a row; verify a unit test of `classify_in` and an e2e test with a fake that stalls forever
+- [x] 11.13 Minor 11: RFC 2217 subnegotiation buffer capped at 256 bytes; verify a parser unit test
+- [x] 11.14 Minor 12: LIMITATIONS documents that a PTY line change can apply to bytes written before `tcsetattr(TCSADRAIN)`; verify by reading the doc
+- [x] 11.15 Minor 13: echo benchmark resynchronises so one lost byte is one loss; verify a unit test of the comparison and an e2e run
+- [x] 11.16 Nits: PTY pending-bytes doc matches the code; NOTIFY-MODEMSTATE sends state and mask; `--data-bits` and SET-DATASIZE accept 5..=8 only; FTDI close clears flow control first; the two timing-dependent tests wait on conditions; verify tests
+- [x] 11.17 Missing tests: a `Cancelled` IN reply carrying data is delivered; client `WILL COM-PORT-OPTION`; `format::device` shows `serial: CP210x` and nothing for a flash drive; a refused non-serial device stays unopened; verify they exist and pass (The refused non-serial device test is `close_gives_the_device_back` plus `bridge_refuses_what_cannot_be_served`; the format test is in `format.rs`.)
+- [x] 11.18 Gates after the round: fmt, clippy, tests (serial_e2e three times), Android clippy
+
+Skipped nits: CP2105 SCI limits (second port of a CP2105 is limited to 921600), cost of `refresh_serial_capable` on every model update (a few descriptor walks).
+
+## 12. Review round 2
+
+- [x] 12.1 Flaky counters in tests: `failed_out_transfer_is_counted_and_reported` waits for `stats().tx` instead of asserting right after the echo; the other tests are audited for the same pattern; verify `serial_e2e` passes 20 runs in a row
+- [x] 12.2 `close()` gives the chip shutdown its own budget (1 s, short per-request timeout) and always sends release and `close_device` with their own short timeout unless a fatal transport error was seen; verify an e2e test with a fake chip that never answers a shutdown request: after `close()` another client can open the device
+- [x] 12.3 PTY `sync_line` on Linux and Android takes only speed, stop bits and flow from the termios and keeps data bits and parity from the port (the kernel forces CS8 and no parity); verify a Linux-only test (7E1, speed change keeps 7E1), a pure unit test of the merge that runs everywhere, and the LIMITATIONS wording (Round 3 note: 13.5 later removed the Linux-only test and the Linux branches; the PTY is macOS only.)
+- [x] 12.4 RFC 2217 negotiation flags mean "request pending" and are cleared when the peer answers or refuses, so renegotiation after WONT/DONT works without loops; verify unit tests for renegotiation; `com_port_enabled()` is used or removed
+- [x] 12.5 TCP accept loop survives transient accept errors (log, wait 100 ms, go on); verify a unit test of the error classification
+- [x] 12.6 CH34x: unexpected quirk-probe status fails the open (as Linux does), no duplicate warning, a short read is an error; verify host e2e tests for a limited chip (divisor encoding) and for the unexpected-status path; correction note on 11.11
+
+## 13. No Linux platform
+
+HubBridge has no Linux platform: desktop is macOS and Windows, USB devices live on the Android phone. References to Linux kernel driver sources as the reference for chip protocols stay, as do `*-linux-android` target triples and the ubuntu runner of the APK job.
+
+- [x] 13.1 CI: Rust matrix is macOS and Windows only, no EXCLUDE logic, `cargo fmt --all --check` on macOS; verify `.github/workflows/ci.yml` has no `ubuntu` outside the APK job
+- [x] 13.2 Repo rules: `CLAUDE.md` says macOS and Windows desktop, Android phone, no Linux code, CI or releases; `openspec/config.yaml` has a real `context:`; verify by reading both
+- [x] 13.3 Agent and Android code: `cfg(any(target_os = "android", target_os = "linux"))` becomes `target_os = "android"`, comments say Android; verify `cargo ndk ... clippy` and `./gradlew assembleDebug`
+- [x] 13.4 Desktop and host small items: no "linux" platform string in the window, no Linux udev hint in `adb.rs`, descriptor docs say Android usbfs; verify `git grep`
+- [x] 13.5 PTY is macOS only: module, dependencies, bridge, CLI, window and tests use `cfg(target_os = "macos")`; all Linux and Android branches deleted (termios2, stick parity, the Linux merge); verify clippy and tests on macOS, no PTY code compiled elsewhere (cfg review, Windows CI)
+- [x] 13.6 Docs and OpenSpec artifacts: ARCHITECTURE, LIMITATIONS (no Linux column), ROADMAP, proposal, design and both delta specs say PTY on macOS, TCP and RFC 2217 on Windows; verify `git grep -n -i -E 'linux|ubuntu'` shows only the kept categories
+- [x] 13.7 Gates: fmt, clippy, tests, Android clippy, APK, `serial_e2e` five times
+
+## 14. Review round 3
+
+- [x] 14.1 `bench_echo` window arithmetic uses `saturating_sub` in all places (a device that sends more than it received); verify a unit test
+- [x] 14.2 `design.md` says `target_os = "macos"` for `pty.rs` and `pty_supported`; verify by reading
+- [x] 14.3 Nits: 9.1 reworded for the macOS and Windows CI and ticked; note on 12.3 that 13.5 removed its Linux-only test; the stale `CLOSE_TIMEOUT` comment in `serial_e2e.rs` fixed; verify by reading
+- [x] 14.4 Tests: CH34x quirk probe answering OK with fewer than 2 bytes fails the open; the accept classifier knows the Windows error codes (`cfg(windows)` test); verify the e2e test runs and the Windows test compiles under cfg
+- [x] 14.5 Roman's decisions: hardware check skipped (group 10 rewritten, `design.md` Open Questions), cancel-safe client sends tracked in issue #7 (`design.md` Risks, ROADMAP), ROADMAP step 2b text and mark; verify by reading and `git grep -i chameleon -- docs`
+
+## Workflow follow-up
+
+- Review round (Opus) against the specs; fixes go back to a Sonnet executor.
+- Archive the change after the PR is merged (`/opsx:archive`).

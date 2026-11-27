@@ -212,7 +212,7 @@ pub fn state_hint(state: &str) -> &'static str {
     match state {
         "unauthorized" => "unlock the phone and allow USB debugging for this computer",
         "offline" => "reconnect the cable or restart adb (`adb kill-server`)",
-        "no" | "no permissions" => "adb has no permission to open the device (Linux: udev rules)",
+        "no" | "no permissions" => "adb has no permission to open the device",
         "authorizing" | "connecting" => "wait a moment",
         _ => "check the phone",
     }

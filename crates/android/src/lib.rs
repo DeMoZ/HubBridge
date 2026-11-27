@@ -96,7 +96,7 @@ struct JavaCallbacks {
 
 impl JavaCallbacks {
     /// Call a Java method returning `int`; `None` if the call failed.
-    #[cfg_attr(not(any(target_os = "android", target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     fn call_int(&self, method: &str, sig: &str, args: &[jni::objects::JValue]) -> Option<i32> {
         let mut env = self.vm.attach_current_thread_permanently().ok()?;
         match env
@@ -136,7 +136,7 @@ impl AgentCallbacks for JavaCallbacks {
 /// USB through the app: Kotlin opens the `UsbDeviceConnection` and returns its fd
 /// (`onOpenDevice`: fd, or -1 no permission, -2 no such device, -3 open failed); we work on
 /// a duplicate and tell Kotlin when to close the connection (`onCloseDevice`).
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(target_os = "android")]
 fn usb_backend(cb: Arc<JavaCallbacks>) -> Arc<dyn hubbridge_agent::usb::UsbBackend> {
     use hubbridge_agent::usb::UsbError;
     use std::os::fd::BorrowedFd;
@@ -214,7 +214,7 @@ fn start(
         app_version,
         usb_host,
     })?;
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(target_os = "android")]
     agent.set_usb_backend(usb_backend(Arc::clone(&callbacks)));
     agent.set_callbacks(callbacks);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -223,7 +223,7 @@ fn start(
         .enable_all()
         .build()?;
     // Loopback only = reachable just through `adb forward`; LAN = Wi-Fi/Ethernet too.
-    // `[::]` is dual-stack on Linux/Android (IPv4 + IPv6); fall back to IPv4 if IPv6 is off.
+    // `[::]` is dual-stack on Android (IPv4 + IPv6); fall back to IPv4 if IPv6 is off.
     let listener = if lan {
         let v6 = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         match rt.block_on(tokio::net::TcpListener::bind(v6)) {

@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use hubbridge_host::discovery::{Browser, DiscoveredAgent};
 use hubbridge_host::install::{self, InstallOptions};
+use hubbridge_host::serial::bridge::{BridgeHandle, BridgeOptions, SerialBridge};
+use hubbridge_host::serial::{self, Flow, Line, SerialConfig};
 use hubbridge_host::{Client, ClientEvent, Store, adb};
 use hubbridge_link::LinkError;
 use hubbridge_proto::{AgentInfo, DEFAULT_PORT, HelloError, Message, UsbDeviceInfo};
@@ -33,8 +35,59 @@ pub struct Model {
     pub agents: Vec<AgentView>,
     pub conn: ConnView,
     pub devices: Vec<UsbDeviceInfo>,
+    /// Devices a serial driver fits (from their descriptors).
+    pub serial_capable: Vec<SerialCapable>,
+    /// Serial bridges, running or stopped (with the reason).
+    pub serial: Vec<SerialView>,
+    /// A PTY can be offered (macOS).
+    pub pty_supported: bool,
     /// Running actions, e.g. "install:R28M303RHET", "pair", "wifi:R28M303RHET".
     pub busy: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SerialCapable {
+    pub id: u32,
+    pub driver: String,
+    pub chip: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SerialView {
+    pub id: u32,
+    pub driver: String,
+    pub chip: Option<String>,
+    pub pty: Option<String>,
+    pub tcp: Option<String>,
+    pub rfc2217: bool,
+    /// `115200 8N1`.
+    pub line: String,
+    pub tx: u64,
+    /// Bytes that could not be sent to the device.
+    pub tx_failed: u64,
+    pub rx: u64,
+    pub dropped: u64,
+    pub errors: u64,
+    pub running: bool,
+    /// Why it stopped, or why it could not start.
+    pub error: Option<String>,
+}
+
+impl Model {
+    /// Recompute which devices a serial driver fits.
+    fn refresh_serial_capable(&mut self) {
+        self.serial_capable = self
+            .devices
+            .iter()
+            .filter_map(|d| {
+                serial::detect(d, 0).ok().map(|det| SerialCapable {
+                    id: d.id,
+                    driver: det.kind.name().to_string(),
+                    chip: det.chip.clone(),
+                })
+            })
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -113,16 +166,50 @@ pub enum Target {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Request {
     Ready,
-    Connect { target: Target },
+    Connect {
+        target: Target,
+    },
     Disconnect,
-    Pair { target: Target, pin: String },
-    Forget { agent_id: String },
-    Grant { id: u32 },
-    Install { serial: String },
-    AdbWifi { serial: String },
-    AdbWifiOff { key: String },
-    AdbPair { addr: String, code: String },
-    AdbConnect { addr: String },
+    Pair {
+        target: Target,
+        pin: String,
+    },
+    Forget {
+        agent_id: String,
+    },
+    Grant {
+        id: u32,
+    },
+    Install {
+        serial: String,
+    },
+    AdbWifi {
+        serial: String,
+    },
+    AdbWifiOff {
+        key: String,
+    },
+    AdbPair {
+        addr: String,
+        code: String,
+    },
+    AdbConnect {
+        addr: String,
+    },
+    /// Start a serial bridge on a device of the phone.
+    SerialStart {
+        id: u32,
+        baud: u32,
+        #[serde(default)]
+        pty: bool,
+        #[serde(default)]
+        tcp_port: Option<u16>,
+        #[serde(default)]
+        rfc2217: bool,
+    },
+    SerialStop {
+        id: u32,
+    },
     Drag,
 }
 
@@ -192,6 +279,29 @@ pub struct App {
     /// The user pressed Disconnect: no auto-connect until they pick a target.
     manual_idle: Mutex<bool>,
     browser: Mutex<Option<Browser>>,
+    /// Running serial bridges by device id.
+    bridges: Mutex<HashMap<u32, Arc<BridgeHandle>>>,
+    /// Devices whose bridge is being started (the id is taken before the first await).
+    starting: Mutex<BTreeSet<u32>>,
+}
+
+/// A device id reserved for a starting bridge; released when dropped.
+struct StartGuard<'a> {
+    set: &'a Mutex<BTreeSet<u32>>,
+    id: u32,
+}
+
+impl<'a> StartGuard<'a> {
+    /// `None` when a start for this id is already under way.
+    fn reserve(set: &'a Mutex<BTreeSet<u32>>, id: u32) -> Option<StartGuard<'a>> {
+        lock(set).insert(id).then(|| StartGuard { set, id })
+    }
+}
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.set).remove(&self.id);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -230,6 +340,7 @@ impl App {
             push,
             model: Mutex::new(Model {
                 version: env!("CARGO_PKG_VERSION"),
+                pty_supported: cfg!(target_os = "macos"),
                 ..Default::default()
             }),
             store: tokio::sync::Mutex::new(store),
@@ -242,6 +353,8 @@ impl App {
             client: Mutex::new(None),
             manual_idle: Mutex::new(false),
             browser: Mutex::new(None),
+            bridges: Mutex::new(HashMap::new()),
+            starting: Mutex::new(BTreeSet::new()),
         });
         lock(&app.model).conn.state = "idle".into();
         app.start_background();
@@ -261,7 +374,11 @@ impl App {
     }
 
     fn update(&self, f: impl FnOnce(&mut Model)) {
-        f(&mut lock(&self.model));
+        {
+            let mut m = lock(&self.model);
+            f(&mut m);
+            m.refresh_serial_capable();
+        }
         self.push_model();
     }
 
@@ -555,8 +672,168 @@ impl App {
                     me.poll_adb(false).await;
                 });
             }
+            Request::SerialStart {
+                id,
+                baud,
+                pty,
+                tcp_port,
+                rfc2217,
+            } => {
+                let me = Arc::clone(self);
+                self.rt
+                    .spawn(async move { me.serial_start(id, baud, pty, tcp_port, rfc2217).await });
+            }
+            Request::SerialStop { id } => {
+                let me = Arc::clone(self);
+                self.rt.spawn(async move { me.stop_bridge(id, None).await });
+            }
             Request::Drag => {}
         }
+    }
+
+    // --- serial bridges ------------------------------------------------------------------
+
+    /// What the page shows of a running bridge.
+    fn bridge_view(id: u32, b: &BridgeHandle) -> SerialView {
+        let i = b.info();
+        let s = b.stats();
+        SerialView {
+            id,
+            driver: i.driver.to_string(),
+            chip: i.chip,
+            pty: i.pty_path,
+            tcp: i.tcp_addr.map(|a| a.to_string()),
+            rfc2217: i.rfc2217,
+            line: i.line.to_string(),
+            tx: s.tx,
+            tx_failed: s.tx_failed,
+            rx: s.rx,
+            dropped: s.rx_dropped,
+            errors: s.line_errors(),
+            running: true,
+            error: None,
+        }
+    }
+
+    fn set_serial_view(&self, view: SerialView) {
+        self.update(|m| {
+            match m.serial.iter_mut().find(|v| v.id == view.id) {
+                Some(v) => *v = view,
+                None => m.serial.push(view),
+            };
+        });
+    }
+
+    async fn serial_start(self: &Arc<Self>, id: u32, baud: u32, pty: bool, tcp_port: Option<u16>, rfc2217: bool) {
+        let fail = |text: String| {
+            self.toast("err", text.clone());
+            self.update(|m| {
+                let v = SerialView {
+                    id,
+                    error: Some(text),
+                    ..Default::default()
+                };
+                match m.serial.iter_mut().find(|x| x.id == id) {
+                    Some(x) => *x = v,
+                    None => m.serial.push(v),
+                };
+            });
+        };
+        // Taken before the first await: two quick Start presses must not open the device twice.
+        // Refusing a duplicate leaves the running bridge's card alone.
+        let Some(_reserved) = StartGuard::reserve(&self.starting, id) else {
+            self.toast("err", "This serial bridge is already starting.");
+            return;
+        };
+        if lock(&self.bridges).contains_key(&id) {
+            self.toast("err", "This serial bridge is already running.");
+            return;
+        }
+        let Some(client) = lock(&self.client).clone() else {
+            return fail("Not connected.".into());
+        };
+        let Some(info) = lock(&self.model).devices.iter().find(|d| d.id == id).cloned() else {
+            return fail("The device is gone.".into());
+        };
+        if !info.has_permission {
+            return fail("No USB permission yet: press Ask phone and tap Allow there.".into());
+        }
+        if !pty && tcp_port.is_none() {
+            return fail("Choose a PTY or a TCP port.".into());
+        }
+        let key = format!("serial:{id}");
+        self.set_busy(&key, true);
+        let opts = BridgeOptions {
+            config: SerialConfig {
+                line: Line {
+                    baud,
+                    ..Line::default()
+                },
+                flow: Flow::None,
+                ..SerialConfig::default()
+            },
+            pty: pty && cfg!(target_os = "macos"),
+            tcp: tcp_port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
+            rfc2217,
+            ..BridgeOptions::default()
+        };
+        let res = SerialBridge::start(client, &info, opts).await;
+        self.set_busy(&key, false);
+        match res {
+            Ok(b) => {
+                let b = Arc::new(b);
+                lock(&self.bridges).insert(id, Arc::clone(&b));
+                self.set_serial_view(Self::bridge_view(id, &b));
+                let me = Arc::clone(self);
+                self.rt.spawn(async move {
+                    let reason = b.done().await;
+                    // Only when it is still the registered bridge: a user stop did its own update.
+                    let current = lock(&me.bridges).get(&id).is_some_and(|x| Arc::ptr_eq(x, &b));
+                    if current {
+                        me.stop_bridge(id, Some(reason)).await;
+                    }
+                });
+            }
+            Err(e) => fail(short(&e)),
+        }
+    }
+
+    /// Stop the bridge of device `id`; `reason` is shown on the card (none: the user stopped it).
+    async fn stop_bridge(&self, id: u32, reason: Option<String>) {
+        let Some(b) = lock(&self.bridges).remove(&id) else {
+            return;
+        };
+        b.stop().await;
+        let mut view = Self::bridge_view(id, &b);
+        view.running = false;
+        view.error = reason;
+        self.set_serial_view(view);
+    }
+
+    async fn stop_all_bridges(&self, reason: &str) {
+        let ids: Vec<u32> = lock(&self.bridges).keys().copied().collect();
+        for id in ids {
+            self.stop_bridge(id, Some(reason.to_string())).await;
+        }
+    }
+
+    /// Byte counters of the running bridges.
+    fn refresh_serial_counters(&self) {
+        let running: Vec<(u32, Arc<BridgeHandle>)> =
+            lock(&self.bridges).iter().map(|(i, b)| (*i, Arc::clone(b))).collect();
+        if running.is_empty() {
+            return;
+        }
+        self.update(|m| {
+            for (id, b) in &running {
+                if let Some(v) = m.serial.iter_mut().find(|v| v.id == *id && v.running) {
+                    let s = b.stats();
+                    let line = b.info().line.to_string();
+                    (v.tx, v.tx_failed, v.rx, v.dropped, v.errors, v.line) =
+                        (s.tx, s.tx_failed, s.rx, s.rx_dropped, s.line_errors(), line);
+                }
+            }
+        });
     }
 
     async fn install(self: &Arc<Self>, serial: String) {
@@ -731,6 +1008,30 @@ impl App {
     }
 
     fn stop_connection(&self) {
+        if !lock(&self.bridges).is_empty() {
+            // Serial bridges need the session: they end with it.
+            let ids: Vec<u32> = lock(&self.bridges).keys().copied().collect();
+            let bridges: Vec<_> = ids
+                .iter()
+                .filter_map(|i| lock(&self.bridges).remove(i).map(|b| (*i, b)))
+                .collect();
+            self.update(|m| {
+                for (id, b) in &bridges {
+                    let mut v = Self::bridge_view(*id, b);
+                    v.running = false;
+                    v.error = Some("the connection to the phone was closed".into());
+                    match m.serial.iter_mut().find(|x| x.id == *id) {
+                        Some(x) => *x = v,
+                        None => m.serial.push(v),
+                    }
+                }
+            });
+            self.rt.spawn(async move {
+                for (_, b) in bridges {
+                    b.stop().await;
+                }
+            });
+        }
         if let Some(h) = lock(&self.conn_task).take() {
             h.abort();
         }
@@ -824,6 +1125,8 @@ impl App {
 
             let reason = self.session_loop(&client).await;
             *lock(&self.client) = None;
+            self.stop_all_bridges(&format!("connection to the phone lost: {reason}"))
+                .await;
             self.update(|m| {
                 m.conn.error = Some(reason);
                 m.devices.clear();
@@ -846,6 +1149,7 @@ impl App {
                     match client.ping(seq).await {
                         Ok(rtt) => {
                             last_ok = Instant::now();
+                            self.refresh_serial_counters();
                             self.update(|m| {
                                 m.conn.rtt.push((rtt.as_secs_f64() * 1000.0 * 100.0).round() / 100.0);
                                 let n = m.conn.rtt.len();
@@ -865,7 +1169,16 @@ impl App {
                             None => m.devices.push(d),
                         }
                     }),
-                    Some(ClientEvent::Message(Message::DeviceRemoved { id })) => self.update(|m| m.devices.retain(|x| x.id != id)),
+                    Some(ClientEvent::Message(Message::DeviceRemoved { id })) => {
+                        self.stop_bridge(id, Some("the device was unplugged".into())).await;
+                        self.update(|m| {
+                            m.devices.retain(|x| x.id != id);
+                            m.serial.retain(|v| v.id != id);
+                        });
+                    }
+                    Some(ClientEvent::Message(Message::DeviceClosed { id, reason })) => {
+                        self.stop_bridge(id, Some(format!("device closed on the phone: {reason}"))).await;
+                    }
                     Some(ClientEvent::Message(Message::DeviceList { devices })) => self.update(|m| m.devices = devices),
                     Some(ClientEvent::Message(_)) => {}
                     Some(ClientEvent::Disconnected(r)) => return r,
@@ -873,5 +1186,75 @@ impl App {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_requests_deserialize() {
+        let r: Request = serde_json::from_str(
+            r#"{"action":"serial_start","id":1002,"baud":115200,"pty":true,"tcp_port":7000,"rfc2217":true}"#,
+        )
+        .unwrap();
+        match r {
+            Request::SerialStart {
+                id,
+                baud,
+                pty,
+                tcp_port,
+                rfc2217,
+            } => assert_eq!(
+                (id, baud, pty, tcp_port, rfc2217),
+                (1002, 115_200, true, Some(7000), true)
+            ),
+            other => panic!("{other:?}"),
+        }
+        // Optional fields may be left out or null.
+        let r: Request =
+            serde_json::from_str(r#"{"action":"serial_start","id":1,"baud":9600,"tcp_port":null}"#).unwrap();
+        assert!(matches!(
+            r,
+            Request::SerialStart {
+                pty: false,
+                tcp_port: None,
+                rfc2217: false,
+                ..
+            }
+        ));
+        let r: Request = serde_json::from_str(r#"{"action":"serial_stop","id":1002}"#).unwrap();
+        assert!(matches!(r, Request::SerialStop { id: 1002 }));
+    }
+
+    #[test]
+    fn a_device_id_can_be_reserved_once() {
+        let set = Mutex::new(BTreeSet::new());
+        let first = StartGuard::reserve(&set, 7).expect("first start");
+        assert!(StartGuard::reserve(&set, 7).is_none(), "second start refused");
+        assert!(StartGuard::reserve(&set, 8).is_some(), "other devices are independent");
+        drop(first);
+        assert!(StartGuard::reserve(&set, 7).is_some(), "released when the start ends");
+    }
+
+    #[test]
+    fn serial_capable_follows_the_device_list() {
+        use hubbridge_proto::fixtures;
+        let mut m = Model {
+            devices: vec![
+                fixtures::cp2102_uart(1),
+                fixtures::flash_drive(2),
+                fixtures::ft232r_uart(3),
+            ],
+            ..Model::default()
+        };
+        m.refresh_serial_capable();
+        let got: Vec<_> = m
+            .serial_capable
+            .iter()
+            .map(|c| (c.id, c.driver.as_str(), c.chip.as_deref()))
+            .collect();
+        assert_eq!(got, vec![(1, "CP210x", None), (3, "FTDI", Some("FT232R"))]);
     }
 }

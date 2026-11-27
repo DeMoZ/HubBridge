@@ -20,6 +20,8 @@ adapter with its endpoints over Wi-Fi and over `adb forward`; unplugging it show
 
 ## Step 2 — USB data forwarding
 
+Step 2b ✅ (serial bridge, tested with fakes in CI; no hardware check yet).
+
 Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
 - [x] Protocol: open/close, claim/release (kernel driver detach), alternate settings,
       control, bulk/interrupt transfers with many in flight in order, clear halt, reset.
@@ -33,12 +35,16 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
    async URB queue for bulk/interrupt with configurable depth, cancellation, reset.
 2. Protocol: `OpenDevice`, `ClaimInterface`, `ControlTransfer`, `SubmitUrb`/`UrbComplete`,
    flow control (per-endpoint credit), binary payloads after the frame header.
-3. First consumer, no OS driver needed: **serial bridge** — CDC-ACM, CP210x, FTDI, CH34x
-   drivers in Rust on the phone; on the host a PTY (macOS/Linux) and a TCP port with
-   RFC 2217 (all platforms). Test: echo loop with an MCU at 115200 and 3 Mbaud, measure
-   throughput and latency.
+3. First consumer, no OS driver needed: **serial bridge** — CDC-ACM, CP210x, FTDI, CH34x.
+   Built (step 2b, tested with fakes; the drivers run on the host over the generic
+   transfers, the agent stays chip-agnostic): `hubbridge serial` with a PTY (macOS),
+   raw TCP and RFC 2217 (macOS and Windows), `--bench-echo` / `--bench-request`, desktop window
+   card. Tested with fakes in CI; no hardware check yet (no USB-serial device on hand). The
+   echo and throughput measurement with a real device stays open (115200 and 3 Mbaud over
+   Wi-Fi); it decides whether a generic agent-side IN stream is needed.
+   Follow-up: cancel-safe sends in the host client (#7).
 4. **USB/IP**: `crates/usbip` codec, agent side executes `CMD_SUBMIT` on usbfs, host side
-   localhost server on 3240 tunnelled through the session; attach with Linux `usbip` and
+   localhost server on 3240 tunnelled through the session; attach with
    usbip-win2 on Windows. Test: HID keyboard, Xbox-style gamepad, USB-UART, flash drive.
 5. HID proxy for macOS (keyboard/mouse via `CGEvent`; generic HID via HIDDriverKit later).
 

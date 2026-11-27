@@ -4,10 +4,11 @@ schema: spec-driven
 # Add only constraints that should guide OpenSpec artifacts and workflows.
 # Include constraints an agent cannot infer by reading the code.
 # Keep general project documentation and discoverable codebase facts out.
-# Example:
-#   context: |
-#     Designs and tasks must cover Windows, macOS, and Linux
-#     Write all artifacts in Spanish
+context: |
+  Platforms: the desktop host runs on macOS and Windows, the phone side is Android
+  (USB devices live on the phone). There is no Linux platform: no Linux code, CI or
+  releases. Linux kernel driver sources may still be cited as the reference for chip
+  protocols.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.

@@ -1,7 +1,7 @@
 //! Parser for raw USB descriptors.
 //!
 //! Input is what Android `UsbDeviceConnection.getRawDescriptors()` (and a read of the
-//! Linux usbfs node) returns: the 18-byte device descriptor followed by every full
+//! Android usbfs node) returns: the 18-byte device descriptor followed by every full
 //! configuration descriptor (config + interface + endpoint + class-specific descriptors).
 
 use thiserror::Error;
@@ -163,5 +163,72 @@ mod tests {
         let n = raw.len();
         raw[18] = 200; // config length past the end
         assert!(matches!(parse(&raw[..n]), Err(DescriptorError::BadLength(18))));
+    }
+
+    fn eps(p: &Parsed, cfg_intf: usize) -> Vec<(u8, u16)> {
+        p.configs[0].interfaces[cfg_intf]
+            .endpoints
+            .iter()
+            .map(|e| (e.address, e.max_packet_size))
+            .collect()
+    }
+
+    #[test]
+    fn parses_uart_adapter_fixtures() {
+        let p = parse(&fixtures::ft232r_raw()).unwrap();
+        assert_eq!(
+            (p.device.vendor_id, p.device.product_id, p.device.bcd_device),
+            (0x0403, 0x6001, 0x0600)
+        );
+        assert_eq!(p.configs[0].interfaces.len(), 1);
+        assert_eq!(eps(&p, 0), vec![(0x81, 64), (0x02, 64)]);
+
+        let p = parse(&fixtures::ft2232h_raw()).unwrap();
+        assert_eq!(
+            (p.device.vendor_id, p.device.product_id, p.device.bcd_device),
+            (0x0403, 0x6010, 0x0700)
+        );
+        assert_eq!(p.configs[0].interfaces.len(), 2);
+        assert_eq!(eps(&p, 0), vec![(0x81, 512), (0x02, 512)]);
+        assert_eq!(eps(&p, 1), vec![(0x83, 512), (0x04, 512)]);
+
+        let p = parse(&fixtures::ft232h_raw()).unwrap();
+        assert_eq!(
+            (p.device.vendor_id, p.device.product_id, p.device.bcd_device),
+            (0x0403, 0x6014, 0x0900)
+        );
+        assert_eq!(eps(&p, 0), vec![(0x81, 512), (0x02, 512)]);
+
+        let p = parse(&fixtures::ch340_raw()).unwrap();
+        assert_eq!((p.device.vendor_id, p.device.product_id), (0x1a86, 0x7523));
+        let i = &p.configs[0].interfaces[0];
+        assert_eq!((i.class, i.subclass, i.protocol), (0xff, 1, 2));
+        assert_eq!(eps(&p, 0), vec![(0x82, 32), (0x02, 32), (0x81, 8)]);
+        assert_eq!(i.endpoints[2].transfer_type(), TransferType::Interrupt);
+    }
+
+    #[test]
+    fn parses_cdc_acm_fixtures_and_skips_class_descriptors() {
+        let p = parse(&fixtures::cdc_acm_simple_raw()).unwrap();
+        assert_eq!((p.device.vendor_id, p.device.product_id), (0x1209, 0x0001));
+        let i = &p.configs[0].interfaces;
+        assert_eq!(i.len(), 2);
+        assert_eq!((i[0].class, i[0].subclass), (0x02, 0x02));
+        assert_eq!(i[1].class, 0x0a);
+        assert_eq!(eps(&p, 0), vec![(0x83, 8)]);
+        assert_eq!(eps(&p, 1), vec![(0x81, 64), (0x02, 64)]);
+
+        let p = parse(&fixtures::cdc_acm_composite_raw()).unwrap();
+        let i = &p.configs[0].interfaces;
+        assert_eq!(
+            i.iter().map(|x| (x.number, x.class)).collect::<Vec<_>>(),
+            vec![(0, 0xff), (1, 0xff), (2, 0x02), (3, 0x0a)]
+        );
+        assert_eq!((i[2].class, i[2].subclass), (0x02, 0x02));
+
+        let p = parse(&fixtures::cdc_acm_no_union_raw()).unwrap();
+        let i = &p.configs[0].interfaces;
+        assert_eq!((i[0].number, i[0].class, i[0].subclass), (0, 0x02, 0x02));
+        assert_eq!((i[1].number, i[1].class), (1, 0x0a));
     }
 }

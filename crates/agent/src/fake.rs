@@ -1,15 +1,23 @@
 //! Fake USB devices for the simulator and tests: real descriptors, standard requests, and
-//! two behaviours behind the bulk endpoints:
-//! - **loopback** (the CP2102 fixture): bytes written to bulk OUT come back on bulk IN;
+//! these behaviours behind the bulk endpoints:
+//! - **loopback**: bytes written to bulk OUT come back on bulk IN;
+//! - **serial chips** ([`serial`]): CP210x, FTDI, CH34x and CDC-ACM with their control
+//!   requests, decoded settings and test hooks;
 //! - **mass storage** (the flash drive fixture): Bulk-Only Transport with a small SCSI
 //!   target (INQUIRY, TEST UNIT READY, REQUEST SENSE, READ CAPACITY(10), READ(10),
 //!   MODE SENSE(6)); block contents follow [`block_byte`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use hubbridge_proto::{Setup, UsbStatus};
+use hubbridge_proto::{Setup, UsbStatus, descriptors};
+use tokio::sync::oneshot;
+
+pub mod serial;
+
+use serial::SerialState;
+pub use serial::{LineErrorKind, ModemLines, SerialChip, SerialDecoded, SerialEvent};
 
 use crate::usb::{BoxFut, TransferResult, UsbBackend, UsbDevice, UsbError};
 
@@ -24,6 +32,8 @@ pub enum FakeKind {
     Loopback,
     /// Bulk-Only mass storage with `blocks` blocks of 512 bytes.
     MassStorage { blocks: u32 },
+    /// A USB serial chip (CP210x, FTDI, CH34x, CDC-ACM) with its control requests.
+    Serial(SerialChip),
     /// Only control transfers (descriptors).
     DescriptorsOnly,
     /// Opening panics: tests that a fault inside the agent still answers the host.
@@ -35,6 +45,10 @@ struct FakeEntry {
     strings: Vec<String>,
     kind: FakeKind,
     permitted: bool,
+    /// Serial chip state: survives closing and reopening the device.
+    serial: Option<Arc<Mutex<SerialState>>>,
+    /// The currently open device, so test hooks can wake its waiting transfers.
+    live: Option<Weak<Mutex<State>>>,
 }
 
 /// A set of fake devices by agent id.
@@ -50,6 +64,10 @@ impl FakeUsb {
 
     /// `strings` are string descriptors 1, 2, 3... (manufacturer, product, serial).
     pub fn add(&self, id: u32, raw: Vec<u8>, strings: &[&str], kind: FakeKind, permitted: bool) {
+        let serial = match &kind {
+            FakeKind::Serial(chip) => Some(Arc::new(Mutex::new(SerialState::new(*chip, &raw)))),
+            _ => None,
+        };
         self.devices.lock().unwrap().insert(
             id,
             FakeEntry {
@@ -57,8 +75,106 @@ impl FakeUsb {
                 strings: strings.iter().map(|s| s.to_string()).collect(),
                 kind,
                 permitted,
+                serial,
+                live: None,
             },
         );
+    }
+
+    fn serial_of(&self, id: u32) -> Arc<Mutex<SerialState>> {
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|e| e.serial.clone())
+            .unwrap_or_else(|| panic!("fake device {id} is not a serial chip"))
+    }
+
+    /// Wake the transfers waiting on the open device after the chip's state changed.
+    fn wake(&self, id: u32) {
+        let live = self.devices.lock().unwrap().get(&id).and_then(|e| e.live.clone());
+        if let Some(state) = live.and_then(|w| w.upgrade()) {
+            state.lock().unwrap().pump_all(true);
+        }
+    }
+
+    /// Every control request and OUT write the serial fake `id` got, in order.
+    pub fn serial_log(&self, id: u32) -> Vec<SerialEvent> {
+        self.serial_of(id).lock().unwrap().log()
+    }
+
+    pub fn clear_serial_log(&self, id: u32) {
+        self.serial_of(id).lock().unwrap().clear_log();
+    }
+
+    /// What the host programmed into port 0 of serial fake `id`.
+    pub fn serial_state(&self, id: u32) -> SerialDecoded {
+        self.serial_state_port(id, 0)
+    }
+
+    pub fn serial_state_port(&self, id: u32, port: usize) -> SerialDecoded {
+        self.serial_of(id).lock().unwrap().decoded(port)
+    }
+
+    /// Change the modem lines the device drives; CDC-ACM and CH34x send an interrupt packet,
+    /// FTDI reports it in the next status header.
+    pub fn set_modem(&self, id: u32, lines: ModemLines) {
+        self.serial_of(id).lock().unwrap().set_modem(lines);
+        self.wake(id);
+    }
+
+    /// Bytes the device sends on its own (not looped back).
+    pub fn inject_rx(&self, id: u32, bytes: &[u8]) {
+        self.serial_of(id).lock().unwrap().inject_rx(bytes);
+        self.wake(id);
+    }
+
+    pub fn inject_line_error(&self, id: u32, kind: LineErrorKind) {
+        self.serial_of(id).lock().unwrap().inject_line_error(kind);
+        self.wake(id);
+    }
+
+    /// The next bulk OUT of the serial fake ends with `status` and is not looped back.
+    pub fn fail_next_out(&self, id: u32, status: UsbStatus) {
+        self.serial_of(id).lock().unwrap().fail_next_out(status);
+    }
+
+    /// Control requests with `request` code end with `status` (`None` clears it).
+    pub fn fail_control_request(&self, id: u32, f: Option<(u8, UsbStatus)>) {
+        self.serial_of(id).lock().unwrap().set_fail_request(f);
+    }
+
+    /// Control reads with this wValue get a single byte (`None` clears it).
+    pub fn set_short_value(&self, id: u32, v: Option<u16>) {
+        self.serial_of(id).lock().unwrap().set_short_value(v);
+    }
+
+    /// While set, the serial fake answers control reads with a single byte.
+    pub fn set_short_reads(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_short_reads(on);
+    }
+
+    /// While set, the serial fake never answers control requests (a wedged chip).
+    pub fn set_hang_control(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_hang_control(on);
+    }
+
+    /// While set, every bulk IN of the serial fake stalls.
+    pub fn set_stall_in(&self, id: u32, on: bool) {
+        self.serial_of(id).lock().unwrap().set_stall_in(on);
+        self.wake(id);
+    }
+
+    /// The next bulk IN ends `Cancelled` but carries `data` (what a cancelled URB can do).
+    pub fn cancel_next_in_with(&self, id: u32, data: &[u8]) {
+        self.serial_of(id).lock().unwrap().cancel_next_in_with(data.to_vec());
+        self.wake(id);
+    }
+
+    /// The next bulk IN of the serial fake stalls once.
+    pub fn stall_next_in(&self, id: u32) {
+        self.serial_of(id).lock().unwrap().stall_next_in();
+        self.wake(id);
     }
 
     pub fn set_permitted(&self, id: u32, permitted: bool) {
@@ -70,14 +186,25 @@ impl FakeUsb {
 
 impl UsbBackend for FakeUsb {
     fn open(&self, id: u32) -> BoxFut<Result<Arc<dyn UsbDevice>, UsbError>> {
-        let res = match self.devices.lock().unwrap().get(&id) {
+        let mut devices = self.devices.lock().unwrap();
+        let res = match devices.get_mut(&id) {
             None => Err(UsbError::NotFound),
             Some(e) if matches!(e.kind, FakeKind::PanicOnOpen) => {
                 return Box::pin(async move { panic!("fake backend: open of device {id} panics") });
             }
             Some(e) if !e.permitted => Err(UsbError::NoPermission("allow USB access on the phone".into())),
-            Some(e) => Ok(Arc::new(FakeDevice {
-                state: Arc::new(Mutex::new(State {
+            Some(e) => {
+                let mut ep_iface = HashMap::new();
+                if let Ok(parsed) = descriptors::parse(&e.raw)
+                    && let Some(cfg) = parsed.configs.first()
+                {
+                    for i in &cfg.interfaces {
+                        for ep in &i.endpoints {
+                            ep_iface.insert(ep.address, i.number);
+                        }
+                    }
+                }
+                let state = Arc::new(Mutex::new(State {
                     raw: e.raw.clone(),
                     strings: e.strings.clone(),
                     kind: e.kind.clone(),
@@ -87,8 +214,14 @@ impl UsbBackend for FakeUsb {
                     msc_csw: None,
                     msc_stall: false,
                     closed: false,
-                })),
-            }) as Arc<dyn UsbDevice>),
+                    ep_iface,
+                    waiters: HashMap::new(),
+                    tickers: HashSet::new(),
+                    serial: e.serial.clone(),
+                }));
+                e.live = Some(Arc::downgrade(&state));
+                Ok(Arc::new(FakeDevice { state }) as Arc<dyn UsbDevice>)
+            }
         };
         Box::pin(async move { res })
     }
@@ -106,6 +239,21 @@ struct State {
     /// The host expects more data than the command produced: stall bulk IN once (BOT 6.7.2).
     msc_stall: bool,
     closed: bool,
+    /// Endpoint address -> number of the interface that owns it.
+    ep_iface: HashMap<u8, u8>,
+    /// IN transfers waiting for data, per endpoint, in submission order.
+    waiters: HashMap<u8, VecDeque<Waiter>>,
+    /// Endpoints with a running FTDI idle-status timer.
+    tickers: HashSet<u8>,
+    serial: Option<Arc<Mutex<SerialState>>>,
+}
+
+/// An IN transfer waiting for data. Like the nusb worker, only the front one's deadline
+/// counts and when it passes every waiting transfer of the endpoint is cancelled.
+struct Waiter {
+    length: u32,
+    deadline: Instant,
+    tx: oneshot::Sender<TransferResult>,
 }
 
 pub struct FakeDevice {
@@ -121,7 +269,7 @@ impl State {
         &self.raw[18.min(self.raw.len())..]
     }
 
-    fn control(&mut self, setup: Setup, _data: &[u8]) -> TransferResult {
+    fn control(&mut self, setup: Setup, data: &[u8]) -> TransferResult {
         let len = setup.length as usize;
         match (setup.request_type, setup.request) {
             // GET_DESCRIPTOR
@@ -154,7 +302,12 @@ impl State {
                 self.msc_csw = None;
                 TransferResult::ok_out(0)
             }
-            // Vendor OUT requests (e.g. CP210x line settings): accept.
+            _ if self.serial.is_some() => {
+                let serial = self.serial.as_ref().unwrap();
+                let r = serial.lock().unwrap().control(setup, data);
+                r.unwrap_or_else(|| TransferResult::failed(UsbStatus::Stall))
+            }
+            // Vendor OUT requests of the plain fakes: accept.
             (t, _) if t & 0x80 == 0 && (t >> 5) & 3 == 2 => TransferResult::ok_out(setup.length as usize),
             _ => TransferResult::failed(UsbStatus::Stall),
         }
@@ -222,33 +375,41 @@ impl State {
         true
     }
 
-    /// Bulk transfer done at queue time (keeps the host's order).
-    fn bulk(&mut self, endpoint: u8, length: u32, data: Vec<u8>) -> Option<TransferResult> {
-        if !self.claimed.contains(&0) {
-            return Some(TransferResult::failed(UsbStatus::InvalidArgument));
-        }
-        let is_in = endpoint & 0x80 != 0;
-        match (self.kind.clone(), is_in) {
-            (FakeKind::Loopback, false) => {
+    fn endpoint_claimed(&self, endpoint: u8) -> bool {
+        self.ep_iface.get(&endpoint).is_some_and(|i| self.claimed.contains(i))
+    }
+
+    /// OUT transfer, done at queue time (keeps the host's order).
+    fn bulk_out(&mut self, endpoint: u8, data: Vec<u8>) -> TransferResult {
+        match self.kind.clone() {
+            FakeKind::Loopback => {
                 self.loop_buf.extend(&data);
-                Some(TransferResult::ok_out(data.len()))
+                TransferResult::ok_out(data.len())
             }
-            (FakeKind::Loopback, true) => {
+            FakeKind::MassStorage { blocks } => {
+                if self.msc_command(&data, blocks) {
+                    TransferResult::ok_out(data.len())
+                } else {
+                    TransferResult::failed(UsbStatus::Stall)
+                }
+            }
+            FakeKind::Serial(_) => self.serial.as_ref().unwrap().lock().unwrap().out(endpoint, data),
+            FakeKind::DescriptorsOnly | FakeKind::PanicOnOpen => TransferResult::failed(UsbStatus::InvalidArgument),
+        }
+    }
+
+    /// The result of an IN transfer if the device has something for it now.
+    fn bulk_in(&mut self, endpoint: u8, length: u32, idle_tick: bool) -> Option<TransferResult> {
+        match self.kind.clone() {
+            FakeKind::Loopback => {
                 if self.loop_buf.is_empty() {
-                    None // wait for data
+                    None
                 } else {
                     let n = (length as usize).min(self.loop_buf.len());
                     Some(TransferResult::ok_in(self.loop_buf.drain(..n).collect()))
                 }
             }
-            (FakeKind::MassStorage { blocks }, false) => {
-                if self.msc_command(&data, blocks) {
-                    Some(TransferResult::ok_out(data.len()))
-                } else {
-                    Some(TransferResult::failed(UsbStatus::Stall))
-                }
-            }
-            (FakeKind::MassStorage { .. }, true) => {
+            FakeKind::MassStorage { .. } => {
                 if !self.msc_data.is_empty() {
                     let n = (length as usize).min(self.msc_data.len());
                     Some(TransferResult::ok_in(self.msc_data.drain(..n).collect()))
@@ -259,9 +420,51 @@ impl State {
                     self.msc_csw.take().map(|csw| TransferResult::ok_in(csw.to_vec()))
                 }
             }
-            (FakeKind::DescriptorsOnly | FakeKind::PanicOnOpen, _) => {
+            FakeKind::Serial(_) => self
+                .serial
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .in_data(endpoint, length, idle_tick),
+            FakeKind::DescriptorsOnly | FakeKind::PanicOnOpen => {
                 Some(TransferResult::failed(UsbStatus::InvalidArgument))
             }
+        }
+    }
+
+    /// Serve waiting IN transfers of `ep` in submission order; when the front one is past its
+    /// deadline and got no data, cancel all of them.
+    fn pump(&mut self, ep: u8, mut idle_tick: bool) {
+        loop {
+            let Some(length) = self.waiters.get(&ep).and_then(|q| q.front()).map(|w| w.length) else {
+                return;
+            };
+            // Only the front transfer may take an idle status packet.
+            let Some(r) = self.bulk_in(ep, length, idle_tick) else {
+                break;
+            };
+            if let Some(w) = self.waiters.get_mut(&ep).and_then(|q| q.pop_front()) {
+                let _ = w.tx.send(r);
+            }
+            idle_tick = false;
+        }
+        let expired = self
+            .waiters
+            .get(&ep)
+            .and_then(|q| q.front())
+            .is_some_and(|w| w.deadline <= Instant::now());
+        if expired && let Some(q) = self.waiters.get_mut(&ep) {
+            for w in q.drain(..) {
+                let _ = w.tx.send(TransferResult::failed(UsbStatus::Cancelled));
+            }
+        }
+    }
+
+    fn pump_all(&mut self, idle_tick: bool) {
+        let eps: Vec<u8> = self.waiters.keys().copied().collect();
+        for ep in eps {
+            self.pump(ep, idle_tick);
         }
     }
 }
@@ -292,28 +495,71 @@ impl UsbDevice for FakeDevice {
         })
     }
 
-    fn control(&self, setup: Setup, data: Vec<u8>, _timeout: Duration) -> BoxFut<TransferResult> {
-        let res = self.state.lock().unwrap().control(setup, &data);
+    fn control(&self, setup: Setup, data: Vec<u8>, timeout: Duration) -> BoxFut<TransferResult> {
+        let mut st = self.state.lock().unwrap();
+        // A wedged chip: standard requests still work, the chip's do not come back.
+        let hang =
+            st.serial.as_ref().is_some_and(|s| s.lock().unwrap().hangs_control()) && setup.request_type & 0x60 != 0;
+        if hang {
+            return Box::pin(async move {
+                tokio::time::sleep(timeout).await;
+                TransferResult::failed(UsbStatus::Cancelled)
+            });
+        }
+        let res = st.control(setup, &data);
         ready(res)
     }
 
     fn transfer(&self, endpoint: u8, length: u32, data: Vec<u8>, timeout: Duration) -> BoxFut<TransferResult> {
-        if let Some(r) = self.state.lock().unwrap().bulk(endpoint, length, data) {
+        let mut st = self.state.lock().unwrap();
+        if st.closed || !st.endpoint_claimed(endpoint) {
+            return ready(TransferResult::failed(UsbStatus::InvalidArgument));
+        }
+        if endpoint & 0x80 == 0 {
+            let r = st.bulk_out(endpoint, data);
+            // Written data may satisfy IN transfers that are already waiting.
+            st.pump_all(false);
             return ready(r);
         }
-        // An IN with nothing to read yet: wait for data like a real device would.
+        let queue_empty = st.waiters.get(&endpoint).is_none_or(|q| q.is_empty());
+        if queue_empty && let Some(r) = st.bulk_in(endpoint, length, false) {
+            return ready(r);
+        }
+        // Nothing to read yet: wait for data like a real device would.
+        let (tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + timeout;
+        st.waiters
+            .entry(endpoint)
+            .or_default()
+            .push_back(Waiter { length, deadline, tx });
+        // Deadline timer: acts only when this transfer (or an expired one) is at the front.
         let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            state.lock().unwrap().pump(endpoint, false);
+        });
+        // FTDI: an idle chip answers every latency-timer period with a status-only packet.
+        let period = st.serial.as_ref().and_then(|s| s.lock().unwrap().idle_tick(endpoint));
+        if let Some(period) = period
+            && st.tickers.insert(endpoint)
+        {
+            let state = Arc::clone(&self.state);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(period).await;
+                    let mut st = state.lock().unwrap();
+                    if st.closed || st.waiters.get(&endpoint).is_none_or(|q| q.is_empty()) {
+                        st.tickers.remove(&endpoint);
+                        return;
+                    }
+                    st.pump(endpoint, true);
+                }
+            });
+        }
+        drop(st);
         Box::pin(async move {
-            let deadline = Instant::now() + timeout;
-            loop {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-                if let Some(r) = state.lock().unwrap().bulk(endpoint, length, Vec::new()) {
-                    return r;
-                }
-                if Instant::now() >= deadline {
-                    return TransferResult::failed(UsbStatus::Cancelled);
-                }
-            }
+            rx.await
+                .unwrap_or_else(|_| TransferResult::failed(UsbStatus::Cancelled))
         })
     }
 
@@ -334,5 +580,13 @@ impl UsbDevice for FakeDevice {
         let mut st = self.state.lock().unwrap();
         st.closed = true;
         st.claimed.clear();
+        for (_, q) in st.waiters.drain() {
+            for w in q {
+                let _ = w.tx.send(TransferResult::failed(UsbStatus::Cancelled));
+            }
+        }
     }
 }
+
+#[cfg(test)]
+mod tests;
