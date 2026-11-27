@@ -719,3 +719,177 @@ async fn consumer_that_does_not_read_loses_bytes_beyond_the_buffer() {
     assert!(p.is_done().is_none(), "dropping does not stop the pump");
     p.close().await;
 }
+
+// --- 6.2 / 6.3 pseudo-terminal front end -----------------------------------------------------
+
+#[cfg(unix)]
+mod pty {
+    use std::os::fd::OwnedFd;
+
+    use hubbridge_host::serial::pty::{PtyFront, PtyOptions};
+    use rustix::fs::{Mode, OFlags, open};
+    use rustix::termios::{OptionalActions, QueueSelector, tcflush, tcgetattr, tcsetattr};
+
+    use super::*;
+
+    /// What an application does: open the slave path.
+    fn open_slave(path: &str) -> OwnedFd {
+        open(path, OFlags::RDWR | OFlags::NOCTTY | OFlags::NONBLOCK, Mode::empty()).expect("open the PTY slave")
+    }
+
+    fn app_write(fd: &OwnedFd, data: &[u8]) {
+        let mut data = data;
+        while !data.is_empty() {
+            match rustix::io::write(fd, data) {
+                Ok(n) => data = &data[n..],
+                Err(rustix::io::Errno::AGAIN) => std::thread::sleep(Duration::from_millis(2)),
+                Err(e) => panic!("write to the PTY: {e}"),
+            }
+        }
+    }
+
+    async fn app_read(fd: &OwnedFd, n: usize) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        let start = std::time::Instant::now();
+        while got.len() < n {
+            match rustix::io::read(fd, &mut buf) {
+                Ok(k) => got.extend_from_slice(&buf[..k]),
+                Err(rustix::io::Errno::AGAIN) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(e) => panic!("read from the PTY: {e}"),
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "PTY read timed out ({} bytes)",
+                got.len()
+            );
+        }
+        got
+    }
+
+    async fn wait_for<F: FnMut() -> bool>(mut f: F) {
+        for _ in 0..400 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition not reached");
+    }
+
+    #[tokio::test]
+    async fn echo_and_reopen() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
+        assert!(pty.path().starts_with("/dev/"), "{}", pty.path());
+        let app = open_slave(pty.path());
+        app_write(&app, b"hello");
+        assert_eq!(app_read(&app, 5).await, b"hello");
+        // Closing and reopening does not stop the bridge.
+        drop(app);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let app = open_slave(pty.path());
+        app_write(&app, b"again");
+        assert_eq!(app_read(&app, 5).await, b"again");
+        assert!(p.is_done().is_none());
+        // Data from the device reaches the application too.
+        e.usb.inject_rx(CP2102, b"from device");
+        assert_eq!(app_read(&app, 11).await, b"from device");
+        pty.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn flush_of_the_pty_purges_the_port() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
+        let app = open_slave(pty.path());
+        e.usb.clear_serial_log(CP2102);
+        tcflush(&app, QueueSelector::IFlush).unwrap();
+        wait_for(|| requests(&e.usb, CP2102).contains(&(0x41, 0x12, 0x000a, 0))).await;
+        e.usb.clear_serial_log(CP2102);
+        tcflush(&app, QueueSelector::OFlush).unwrap();
+        wait_for(|| requests(&e.usb, CP2102).contains(&(0x41, 0x12, 0x0005, 0))).await;
+        pty.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn line_change_comes_before_the_data_that_follows() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
+        let app = open_slave(pty.path());
+        e.usb.clear_serial_log(CP2102);
+        let mut t = tcgetattr(&app).unwrap();
+        t.set_speed(57_600).unwrap();
+        t.control_modes |= rustix::termios::ControlModes::PARENB;
+        tcsetattr(&app, OptionalActions::Now, &t).unwrap();
+        app_write(&app, b"x");
+        wait_for(|| {
+            e.usb
+                .serial_log(CP2102)
+                .iter()
+                .any(|ev| matches!(ev, SerialEvent::Out { .. }))
+        })
+        .await;
+        let log = e.usb.serial_log(CP2102);
+        let out = log.iter().position(|ev| matches!(ev, SerialEvent::Out { .. })).unwrap();
+        let baud = log
+            .iter()
+            .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x1e))
+            .expect("baud change logged");
+        let line = log
+            .iter()
+            .position(|ev| matches!(ev, SerialEvent::Control { setup, .. } if setup.request == 0x03))
+            .expect("line control logged");
+        assert!(baud < out && line < out, "line change before the data: {log:?}");
+        let d = e.usb.serial_state(CP2102);
+        assert_eq!((d.baud, d.parity), (57_600, 2), "even parity");
+        assert_eq!(p.line().baud, 57_600);
+        pty.stop();
+        p.close().await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn nonstandard_rate_reaches_the_chip() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions::default()).unwrap();
+        let app = open_slave(pty.path());
+        let mut t = tcgetattr(&app).unwrap();
+        t.set_speed(250_000).unwrap();
+        tcsetattr(&app, OptionalActions::Now, &t).unwrap();
+        wait_for(|| e.usb.serial_state(CP2102).baud == 250_000).await;
+        pty.stop();
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn locked_line_ignores_the_application() {
+        let e = env().await;
+        let cfg = SerialConfig {
+            line: Line {
+                baud: 921_600,
+                ..Line::default()
+            },
+            ..SerialConfig::default()
+        };
+        // CP2102N takes 921600.
+        let p = e.open_with(CP2102N, cfg, PortOptions::default()).await;
+        let pty = PtyFront::start(p.clone(), PtyOptions { lock_line: true }).unwrap();
+        let app = open_slave(pty.path());
+        let mut t = tcgetattr(&app).unwrap();
+        t.set_speed(9600).unwrap();
+        tcsetattr(&app, OptionalActions::Now, &t).unwrap();
+        app_write(&app, b"data");
+        assert_eq!(app_read(&app, 4).await, b"data");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(e.usb.serial_state(CP2102N).baud, 921_600);
+        pty.stop();
+        p.close().await;
+    }
+}
