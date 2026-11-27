@@ -3,7 +3,7 @@
 **Android-смартфон с USB-C хабом превращается в мост по Wi-Fi/LAN: USB-устройства хаба (а
 дальше и дисплеи, и карты захвата) становятся доступны на компьютере с macOS или Windows.**
 
-Android-агент (Kotlin + ядро на Rust) · десктоп-хост для macOS, Windows, Linux (Rust) · MIT
+Android-агент (Kotlin + ядро на Rust) · приложение для macOS и Windows (Rust) · MIT
 
 [English version](README.md)
 
