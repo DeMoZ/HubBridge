@@ -33,6 +33,9 @@ pub fn device(d: &UsbDeviceInfo) -> String {
         facts.push(format!("{} descriptor bytes", raw.len()));
     }
     let _ = writeln!(s, "    {}", facts.join(" · "));
+    if let Ok(serial) = crate::serial::detect(d, 0) {
+        let _ = writeln!(s, "    serial: {}", serial.label());
+    }
     for c in &d.configurations {
         let name = c
             .name

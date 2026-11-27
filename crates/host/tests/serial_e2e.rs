@@ -1422,3 +1422,137 @@ mod net {
         assert!(format!("{err:#}").contains("not a supported USB serial device"));
     }
 }
+
+// --- 7.3 / 7.4 measurements --------------------------------------------------------------------
+
+mod bench {
+    use hubbridge_host::serial::bench::{EchoOptions, RequestOptions, bench_echo, bench_request};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn echo_bench_on_cp210x_and_ft232r() {
+        let e = env().await;
+        for id in [CP2102, FT232R] {
+            let p = e.open(id).await;
+            let r = bench_echo(
+                &p,
+                &EchoOptions {
+                    count: 30,
+                    bytes: 64 * 1024,
+                    ..EchoOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!((r.lost, r.wrong), (0, 0), "device {id}");
+            assert_eq!(r.rounds, 30);
+            let lat = r.latency.expect("percentiles");
+            assert!(lat.p50 <= lat.p95 && lat.p95 <= lat.max && lat.max > Duration::ZERO);
+            assert_eq!(r.stream_bytes, 64 * 1024);
+            assert!(r.kb_per_s > 0.0 && r.line_rate_percent > 0.0);
+            p.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn echo_bench_with_a_small_window_loses_nothing() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let r = bench_echo(
+            &p,
+            &EchoOptions {
+                count: 2,
+                bytes: 1000,
+                window: 100,
+                size: 8,
+                timeout: Duration::from_millis(300),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.lost, r.wrong), (0, 0));
+        assert_eq!(r.stream_bytes, 1000);
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn request_with_fixed_reply_length() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let r = bench_request(
+            &p,
+            &RequestOptions {
+                request: vec![0x01, 0x02],
+                reply_len: Some(2),
+                reply_idle: None,
+                count: 20,
+                interval: Duration::ZERO,
+                timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.rounds, r.timeouts), (20, 0));
+        assert_eq!(r.first_reply, Some(vec![0x01, 0x02]));
+        assert!(r.latency.is_some());
+        assert_eq!(r.reply_bytes, 40);
+        // A reply longer than the device sends: every round times out and is counted.
+        let r = bench_request(
+            &p,
+            &RequestOptions {
+                request: vec![0x01, 0x02],
+                reply_len: Some(4),
+                reply_idle: None,
+                count: 3,
+                interval: Duration::from_millis(5),
+                timeout: Duration::from_millis(150),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.rounds, r.timeouts), (3, 3));
+        assert!(r.first_reply.is_none() && r.latency.is_none());
+        p.close().await;
+    }
+
+    #[tokio::test]
+    async fn request_with_idle_end_of_reply() {
+        let e = env().await;
+        let p = e.open(CP2102).await;
+        let r = bench_request(
+            &p,
+            &RequestOptions {
+                request: vec![9, 8, 7],
+                reply_len: None,
+                reply_idle: Some(Duration::from_millis(40)),
+                count: 5,
+                interval: Duration::ZERO,
+                timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.timeouts, r.first_reply), (0, Some(vec![9, 8, 7])));
+        assert!(r.reply_bytes_per_s > 0.0);
+        p.close().await;
+        // Neither rule: refused.
+        let p = e.open(CP2102).await;
+        assert!(
+            bench_request(
+                &p,
+                &RequestOptions {
+                    request: vec![1],
+                    reply_len: None,
+                    reply_idle: None,
+                    count: 1,
+                    interval: Duration::ZERO,
+                    timeout: Duration::from_secs(1)
+                }
+            )
+            .await
+            .is_err()
+        );
+        p.close().await;
+    }
+}

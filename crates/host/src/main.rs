@@ -1,10 +1,14 @@
 //! `hubbridge` — desktop CLI for the HubBridge agent.
 
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use hubbridge_host::serial::bench::{self, EchoOptions, RequestOptions};
+use hubbridge_host::serial::bridge::{BridgeOptions, SerialBridge};
+use hubbridge_host::serial::{Flow, Line, Parity, PortOptions, SerialConfig, SerialPort, StopBits, tcp};
 use hubbridge_host::{Client, ClientEvent, Store, discovery, format, resolve};
 use hubbridge_proto::Message;
 
@@ -86,6 +90,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UsbCmd,
     },
+    /// Use a USB serial device on the phone (CDC-ACM, CP210x, FTDI, CH34x) as a serial port
+    /// on this computer: a PTY and/or a TCP port, or measure it with --bench-echo /
+    /// --bench-request.
+    Serial(SerialArgs),
     /// List paired agents.
     Agents,
     /// Forget a paired agent (also remove this computer in the phone app).
@@ -115,6 +123,322 @@ enum UsbCmd {
         #[arg(long, default_value_t = 1024)]
         command_kib: u32,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ParityArg {
+    None,
+    Odd,
+    Even,
+    Mark,
+    Space,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FlowArg {
+    None,
+    Rtscts,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+#[derive(Args)]
+struct SerialArgs {
+    /// Device id from `hubbridge devices`.
+    id: u32,
+    target: Option<String>,
+    #[arg(long, default_value_t = 115_200)]
+    baud: u32,
+    #[arg(long, default_value_t = 8)]
+    data_bits: u8,
+    #[arg(long, value_enum, default_value = "none")]
+    parity: ParityArg,
+    /// 1, 1.5 or 2.
+    #[arg(long, default_value = "1")]
+    stop_bits: String,
+    #[arg(long, value_enum, default_value = "none")]
+    flow: FlowArg,
+    /// DTR when the port opens.
+    #[arg(long, value_enum, default_value = "on")]
+    dtr: OnOff,
+    /// RTS when the port opens.
+    #[arg(long, value_enum, default_value = "on")]
+    rts: OnOff,
+    /// Which port of a multi-port device (FTDI, dual CDC); 0 is the first.
+    #[arg(long, default_value_t = 0)]
+    port: usize,
+    /// Serve a pseudo-terminal (macOS, Linux; the default there without --tcp).
+    #[arg(long)]
+    pty: bool,
+    /// Serve TCP on this port (127.0.0.1) or address:port.
+    #[arg(long, value_name = "ADDR|PORT")]
+    tcp: Option<String>,
+    /// With --tcp: speak RFC 2217 (baud rate, DTR/RTS, break) instead of a raw stream.
+    #[arg(long)]
+    rfc2217: bool,
+    /// Ignore the line settings programs set on the PTY / RFC 2217 connection.
+    #[arg(long)]
+    lock_line: bool,
+    /// IN transfers kept in flight.
+    #[arg(long, default_value_t = 4)]
+    in_flight: usize,
+    /// FTDI latency timer (1-255 ms).
+    #[arg(long, default_value_t = 16)]
+    ftdi_latency_ms: u8,
+    /// Measure round trips and throughput on a device that echoes (TX wired to RX).
+    #[arg(long)]
+    bench_echo: bool,
+    /// Round trips for --bench-echo and rounds for --bench-request.
+    #[arg(long)]
+    count: Option<usize>,
+    /// Bytes per round trip of --bench-echo.
+    #[arg(long, default_value_t = 32)]
+    size: usize,
+    /// Bytes of the --bench-echo stream.
+    #[arg(long, default_value_t = 1_048_576)]
+    bytes: usize,
+    /// Bytes unacknowledged at most during the --bench-echo stream.
+    #[arg(long, default_value_t = 512)]
+    window: usize,
+    /// Send these bytes (hex) repeatedly and time the replies (needs --reply-len or --reply-idle-ms).
+    #[arg(long, value_name = "HEX")]
+    bench_request: Option<String>,
+    /// A reply is complete after this many bytes.
+    #[arg(long)]
+    reply_len: Option<usize>,
+    /// A reply is complete when the line is idle this long after the first byte.
+    #[arg(long)]
+    reply_idle_ms: Option<u64>,
+    /// Milliseconds between requests.
+    #[arg(long, default_value_t = 0)]
+    interval_ms: u64,
+    /// A round without a complete reply after this long counts as timed out.
+    #[arg(long, default_value_t = 1000)]
+    reply_timeout_ms: u64,
+}
+
+fn parse_stop_bits(s: &str) -> Result<StopBits> {
+    Ok(match s {
+        "1" => StopBits::One,
+        "1.5" => StopBits::OnePointFive,
+        "2" => StopBits::Two,
+        other => bail!("--stop-bits is 1, 1.5 or 2, not '{other}'"),
+    })
+}
+
+fn parse_hex(s: &str) -> Result<Vec<u8>> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
+    hex::decode(clean.trim_start_matches("0x")).map_err(|e| anyhow::anyhow!("--bench-request is hex bytes: {e}"))
+}
+
+fn hex_string(b: &[u8]) -> String {
+    hex::encode(b)
+}
+
+fn ms_f(d: Duration) -> String {
+    format::ms(d)
+}
+
+async fn serial(a: SerialArgs, store: &mut Store) -> Result<()> {
+    let measuring = a.bench_echo || a.bench_request.is_some();
+    let tcp_addr = a.tcp.as_deref().map(tcp::parse_listen).transpose()?;
+    if a.rfc2217 && tcp_addr.is_none() {
+        bail!("--rfc2217 needs --tcp");
+    }
+    // PTY by default where there is one and nothing else was asked for.
+    let pty = a.pty || (cfg!(unix) && tcp_addr.is_none() && !measuring);
+    if !measuring && pty && !cfg!(unix) {
+        bail!("a pseudo-terminal is not available on this platform: use --tcp PORT (with --rfc2217 for line control)");
+    }
+    if !measuring && !pty && tcp_addr.is_none() {
+        bail!("nothing to serve: use --pty (macOS, Linux) or --tcp PORT");
+    }
+    let config = SerialConfig {
+        line: Line {
+            baud: a.baud,
+            data_bits: a.data_bits,
+            parity: match a.parity {
+                ParityArg::None => Parity::None,
+                ParityArg::Odd => Parity::Odd,
+                ParityArg::Even => Parity::Even,
+                ParityArg::Mark => Parity::Mark,
+                ParityArg::Space => Parity::Space,
+            },
+            stop_bits: parse_stop_bits(&a.stop_bits)?,
+        },
+        flow: match a.flow {
+            FlowArg::None => Flow::None,
+            FlowArg::Rtscts => Flow::RtsCts,
+        },
+        dtr: matches!(a.dtr, OnOff::On),
+        rts: matches!(a.rts, OnOff::On),
+    };
+    let port_opts = PortOptions {
+        port: a.port,
+        in_flight: a.in_flight.clamp(1, 32),
+        ftdi_latency_ms: a.ftdi_latency_ms.max(1),
+        ..PortOptions::default()
+    };
+    let request = a.bench_request.as_deref().map(parse_hex).transpose()?;
+
+    let client = Arc::new(connect(a.target.as_deref(), store).await?);
+    let info = device_info(&client, a.id).await?;
+
+    if measuring {
+        let port = SerialPort::open(Arc::clone(&client), &info, config, port_opts)
+            .await
+            .map_err(permission_hint)?;
+        let pi = port.info();
+        println!(
+            "{} on {} at {} over {}",
+            pi.label,
+            info.label(),
+            pi.line,
+            if client.addr.ip().is_loopback() {
+                "ADB / localhost"
+            } else {
+                "Wi-Fi/LAN"
+            }
+        );
+        let res = measure(&port, &a, request).await;
+        port.drain().await;
+        let _ = port.refresh_errors().await;
+        let s = port.stats();
+        println!(
+            "counters: {} bytes sent, {} received, {} dropped, {} line errors",
+            s.tx,
+            s.rx,
+            s.rx_dropped,
+            s.line_errors()
+        );
+        port.close().await;
+        res?;
+        return Ok(());
+    }
+
+    let bridge = SerialBridge::start(
+        Arc::clone(&client),
+        &info,
+        BridgeOptions {
+            config,
+            port: port_opts,
+            pty,
+            tcp: tcp_addr,
+            rfc2217: a.rfc2217,
+            lock_line: a.lock_line,
+        },
+    )
+    .await
+    .map_err(permission_hint)?;
+    let bi = bridge.info();
+    println!("{} on {}", bi.label, info.label());
+    println!(
+        "line     {}, flow {}",
+        bi.line,
+        if bi.flow == Flow::RtsCts { "RTS/CTS" } else { "none" }
+    );
+    if let Some(p) = &bi.pty_path {
+        println!("PTY      {p}");
+    }
+    if let Some(t) = bi.tcp_addr {
+        println!("TCP      {t}{}", if bi.rfc2217 { " (RFC 2217)" } else { "" });
+    }
+    if let Some(w) = &bi.warning {
+        eprintln!("warning: {w}");
+    }
+    println!("Ctrl-C to stop.");
+
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    let mut seq = 0u32;
+    let outcome: Result<()> = loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+            reason = bridge.done() => break Err(anyhow::anyhow!("the serial bridge ended: {reason}")),
+            _ = tick.tick() => {
+                // The agent closes a session that sends nothing for 20 s.
+                seq += 1;
+                if let Err(e) = client.ping(seq).await {
+                    break Err(anyhow::anyhow!("the connection to the phone is gone: {e:#}"));
+                }
+            }
+        }
+    };
+    bridge.stop().await;
+    drop(bridge);
+    if let Ok(c) = Arc::try_unwrap(client) {
+        c.close().await;
+    }
+    outcome
+}
+
+async fn measure(port: &SerialPort, a: &SerialArgs, request: Option<Vec<u8>>) -> Result<()> {
+    if a.bench_echo {
+        let mut o = EchoOptions {
+            size: a.size,
+            bytes: a.bytes,
+            window: a.window,
+            ..EchoOptions::default()
+        };
+        if let Some(c) = a.count {
+            o.count = c;
+        }
+        let r = bench::bench_echo(port, &o).await?;
+        match r.latency {
+            Some(l) => println!(
+                "latency  {} round trips of {} bytes: p50 {} / p95 {} / max {}",
+                r.rounds,
+                o.size,
+                ms_f(l.p50),
+                ms_f(l.p95),
+                ms_f(l.max)
+            ),
+            None => println!("latency  no round trip completed"),
+        }
+        println!(
+            "stream   {} bytes in {:.2} s: {:.1} KB/s ({:.0}% of the line rate of {})",
+            r.stream_bytes,
+            r.elapsed.as_secs_f64(),
+            r.kb_per_s,
+            r.line_rate_percent,
+            port.line()
+        );
+        println!("{} bytes lost, {} wrong", r.lost, r.wrong);
+    }
+    if let Some(request) = request {
+        let o = RequestOptions {
+            request,
+            reply_len: a.reply_len,
+            reply_idle: a.reply_idle_ms.map(Duration::from_millis),
+            count: a.count.unwrap_or(100),
+            interval: Duration::from_millis(a.interval_ms),
+            timeout: Duration::from_millis(a.reply_timeout_ms),
+        };
+        let r = bench::bench_request(port, &o).await?;
+        match &r.first_reply {
+            Some(b) => println!("reply    {} ({} bytes)", hex_string(b), b.len()),
+            None => println!("reply    none"),
+        }
+        match r.latency {
+            Some(l) => println!(
+                "latency  {} of {} rounds: p50 {} / p95 {} / max {}",
+                r.rounds - r.timeouts,
+                r.rounds,
+                ms_f(l.p50),
+                ms_f(l.p95),
+                ms_f(l.max)
+            ),
+            None => println!("latency  no round got a reply"),
+        }
+        println!(
+            "{} rounds timed out; reply throughput {:.0} bytes/s",
+            r.timeouts, r.reply_bytes_per_s
+        );
+    }
+    Ok(())
 }
 
 async fn device_info(c: &Client, id: u32) -> Result<hubbridge_proto::UsbDeviceInfo> {
@@ -374,6 +698,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Usb { cmd } => usb(cmd, &mut store).await?,
+        Cmd::Serial(a) => serial(a, &mut store).await?,
         Cmd::Agents => {
             if store.data.agents.is_empty() {
                 println!("No paired agents. Host id {}.", short(&store.data.host_id));
