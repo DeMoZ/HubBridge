@@ -45,8 +45,8 @@ Groups 1–4 were implemented before OpenSpec was adopted in this repo (commits 
 
 ## 7. Integration check on hardware
 
-- [ ] 7.1 Rebuild and install the APK over Wi-Fi ADB (`hubbridge install-apk --serial <ip>:5555`), then run `hubbridge usb descriptors 1004` and `hubbridge usb storage 1004 --bench 32` on the phone with the flash drive on the hub; verify both succeed and record the speed in the PR
-- [ ] 7.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass, then commit with the OpenSpec change and push; verify CI on PR #5 is green
+- [x] 7.1 Rebuild and install the APK over Wi-Fi ADB (`hubbridge install-apk --serial <ip>:5555`), then run `hubbridge usb descriptors 1004` and `hubbridge usb storage 1004 --bench 32` on the phone with the flash drive on the hub; verify both succeed and record the speed in the PR
+- [x] 7.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; verify all pass, then commit with the OpenSpec change and push; verify CI on PR #5 is green
 
 ## Workflow follow-up
 
