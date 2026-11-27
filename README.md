@@ -55,8 +55,8 @@ cargo run -p hubbridge-host -- watch                     # add --churn 3 to the 
    cd android && ./gradlew installDebug     # builds the Rust core with cargo-ndk first
    ```
 
-   Needs the Android SDK (`ANDROID_HOME` or `android/local.properties`) and JDK 17+;
-   Gradle downloads NDK 27 if it is missing.
+   Needs the Android SDK (`ANDROID_HOME` or `android/local.properties`), JDK 17+ and
+   NDK 27: `sdkmanager "ndk;27.2.12479018"`.
 
 2. On the phone: open HubBridge → **Start: Wi-Fi/LAN + ADB** → **Pair a new computer**.
 3. On the computer (same network):

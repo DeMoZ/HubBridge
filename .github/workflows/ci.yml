@@ -43,8 +43,10 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+      - name: Install NDK and cargo-ndk
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.2.12479018" > /dev/null
+          cargo install cargo-ndk --locked
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
