@@ -66,6 +66,21 @@ enum Cmd {
         #[arg(long)]
         serial: Option<String>,
     },
+    /// Install or update the HubBridge app on a phone connected by USB (adb), then open it.
+    InstallApk {
+        /// adb serial; needed only when several phones are connected.
+        #[arg(long)]
+        serial: Option<String>,
+        /// APK to install (default: bundled HubBridge.apk, or the APK built in this checkout).
+        #[arg(long)]
+        apk: Option<std::path::PathBuf>,
+        /// Do not open the app after installing.
+        #[arg(long)]
+        no_launch: bool,
+        /// If the installed app has another signing key, uninstall it first (forgets its pairings).
+        #[arg(long)]
+        replace_incompatible: bool,
+    },
     /// List paired agents.
     Agents,
     /// Forget a paired agent (also remove this computer in the phone app).
@@ -192,6 +207,40 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Adb { serial } => {
             let addr = hubbridge_host::adb::forward(serial.as_deref(), hubbridge_proto::DEFAULT_PORT).await?;
             println!("{addr}");
+        }
+        Cmd::InstallApk {
+            serial,
+            apk,
+            no_launch,
+            replace_incompatible,
+        } => {
+            let opts = hubbridge_host::install::InstallOptions {
+                serial,
+                apk,
+                launch: !no_launch,
+                replace_incompatible,
+            };
+            let target = hubbridge_host::adb::pick(opts.serial.as_deref()).await?;
+            let src = hubbridge_host::install::find_apk(opts.apk.as_deref())?;
+            println!(
+                "Installing {} ({}) on {} ...",
+                src.path.display(),
+                src.origin,
+                target.label()
+            );
+            let r = hubbridge_host::install::install(&opts).await?;
+            let was = r
+                .previous_version
+                .as_deref()
+                .map(|v| format!(" (was {v})"))
+                .unwrap_or_default();
+            println!("Installed HubBridge {}{was}.", r.version.as_deref().unwrap_or("?"));
+            if r.reinstalled {
+                println!("The old app was removed first: pair this computer again.");
+            }
+            if r.launched {
+                println!("Opened on the phone: tap Start, then Pair a new computer.");
+            }
         }
         Cmd::Agents => {
             if store.data.agents.is_empty() {
