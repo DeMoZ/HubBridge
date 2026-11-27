@@ -85,10 +85,17 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
      `com.apple.developer.usb.host-controller-interface`, granted only on request. Plan for
      macOS without it → class proxies below.
 2. **Class proxies** (no kernel driver, per device class):
-   - CDC-ACM / FTDI / CP210x / CH34x serial → the phone drives the chip (Rust port of the
-     vendor protocols, like `usb-serial-for-android`), the host exposes a pseudo-terminal
-     (macOS/Linux `openpty` → `/dev/ttysNNN`) or a virtual COM port on Windows (needs a signed
-     driver such as com0com) or simply a TCP serial port (RFC 2217);
+   - CDC-ACM / FTDI / CP210x / CH34x serial (built, step 2b) → the chip logic runs **on the
+     host** over the generic step 2a transfers (`crates/host/src/serial`): the encoders for
+     each chip are pure functions checked against the Linux drivers, the agent stays
+     chip-agnostic and needs no update per chip. The port core keeps several bulk IN
+     transfers in flight, writes OUT transfers in order and reads modem status from the
+     interrupt endpoint (CDC-ACM, CH34x), the in-band header (FTDI) or polling (CP210x). Front
+     ends: a pseudo-terminal (macOS/Linux `openpty` → `/dev/ttysNNN`), a raw TCP port and an
+     RFC 2217 TCP port (all platforms; a Windows virtual COM port would need a signed driver
+     such as com0com and is not shipped). A planned *generic* agent-side IN stream (chip
+     agnostic, keeps IN transfers queued on the phone) is the option if UART adapters turn
+     out to lose bytes at high baud rates over Wi-Fi; see LIMITATIONS "Serial over Wi-Fi";
    - HID → report descriptors + interrupt IN reports forwarded; the host injects via a virtual
      HID device (macOS HIDDriverKit dext, DriverKit entitlements + user approval; Windows VHF
      driver or ViGEm-style gamepad driver) or, for keyboards/mice only, synthesized input

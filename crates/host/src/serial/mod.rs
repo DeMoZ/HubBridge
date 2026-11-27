@@ -21,6 +21,7 @@ pub mod tcp;
 use hubbridge_proto::Setup;
 
 pub use detect::{Detected, DriverKind, NotSerial, detect};
+pub use port::{PortInfo, PortOptions, SerialPort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Parity {

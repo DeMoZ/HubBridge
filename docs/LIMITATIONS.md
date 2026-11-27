@@ -83,6 +83,43 @@ Limits and gotchas:
   mutually authenticated (Noise). An attacker on the LAN gets one PIN guess per connection,
   three per PIN.
 
+### Serial over Wi-Fi
+
+`hubbridge serial` drives CDC-ACM, CP210x, FTDI (FT232BM and newer) and CH34x devices from the
+desktop, over the generic USB transfers (the phone runs no chip code). What that costs:
+
+- **Opening and changing the line** takes 3 to 7 control requests, one after the other: about
+  3 to 7 round trips (10 to 60 ms on good Wi-Fi). Setting a baud rate is rare, so this does
+  not matter; changing it right after writing waits for the written bytes to leave first.
+- **Request/response latency** is about one round trip plus the device's own time. Writes are
+  pipelined, received data costs one one-way trip because the next IN transfer is already
+  queued.
+- **Sustained receive on UART chips is the real limit.** CP210x and CH34x answer an IN token
+  with whatever they have, so the queued IN transfers are used up within microseconds and
+  the endpoint has nothing queued for about one round trip while the host's resubmissions
+  travel. The chip buffers meanwhile (CP2102 576 bytes, FT232R 256 bytes): 576 bytes last
+  about 50 ms at 115200 baud, 6 ms at 921600 and under 2 ms at 3 Mbaud. A Wi-Fi spike longer
+  than that loses bytes unless RTS/CTS is wired (`--flow rtscts`); the counters show chip
+  overruns where the chip reports them. FTDI holds a transfer until 62 bytes or the latency
+  timer and so absorbs gaps better; native CDC-ACM devices (Chameleon, TinyUSB, ESP32-S3,
+  RP2040 boards) hold data in firmware until the host asks, so they slow down instead of
+  losing data.
+- **FTDI idle traffic**: an idle FTDI chip answers an IN transfer with a 2-byte status packet
+  every latency-timer period (16 ms by default, `--ftdi-latency-ms`): about 60 small
+  messages per second each way.
+- **CP210x modem status** is polled (200 ms) only while an RFC 2217 client asks for it.
+- **60 s IN timeout**: the agent caps transfer timeouts at 60 s, so an idle line gets all its
+  IN transfers cancelled and resubmitted every minute (data is never lost to that; the chip
+  buffers for one round trip).
+- A bridge ends when the device is unplugged or the session drops; reconnecting after a
+  dropped session is step 4.
+- Not supported: XON/XOFF and DTR/DSR flow control, 9-bit data, FTDI bit-bang/MPSSE, FT8U232AM,
+  Prolific PL2303, CH343/CH9102 vendor mode (they enumerate as CDC-ACM and use that driver),
+  two ports of one multi-port FTDI at the same time (`--port N` picks one).
+- The remedy for high-baud loss, if measurements on real adapters need it, is a generic IN
+  stream in the agent (chip-agnostic, queued on the phone); it is not built. Measure first:
+  `hubbridge serial <id> --bench-echo` on an adapter with TX wired to RX.
+
 ## 4. Desktop: making devices appear to the OS
 
 | Goal | Linux | Windows | macOS |

@@ -365,6 +365,10 @@ impl SerialState {
         if let Some(p) = self.ports.iter_mut().find(|p| p.intr_ep == Some(ep)) {
             let pkt = p.intr_queue.pop_front()?;
             let n = pkt.len().min(length as usize);
+            if n < pkt.len() {
+                // Longer than one packet: the rest comes with the next transfer.
+                p.intr_queue.push_front(pkt[n..].to_vec());
+            }
             return Some(TransferResult::ok_in(pkt[..n].to_vec()));
         }
         Some(TransferResult::failed(UsbStatus::InvalidArgument))
