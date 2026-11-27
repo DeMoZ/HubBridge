@@ -178,10 +178,16 @@ HubBridge/
 │       ├── UsbScanner.kt      UsbManager → JSON
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
-├── scripts/                   make-icon.sh / make-icon.swift: redraw the app icon (macOS)
-├── docs/                      ARCHITECTURE, LIMITATIONS, PROTOCOL, ROADMAP
-└── .github/workflows/ci.yml   fmt, clippy, tests on macOS and Windows; APK
+├── scripts/                   make-icon.sh / make-icon.swift: redraw the app icon (macOS);
+│                              build-macos.sh: .app, .dmg, update zip, CLI archive; version.sh: the version
+├── docs/                      ARCHITECTURE, LIMITATIONS, PROTOCOL, ROADMAP, RELEASING
+│   └── releases/              release notes, one v<version>.md per release
+└── .github/workflows/
+    ├── ci.yml                 fmt, clippy, tests on macOS and Windows; APK
+    └── release.yml            a v* tag builds and publishes the release (see RELEASING.md)
 ```
+
+Releases (version, signing, files) are described in [RELEASING.md](RELEASING.md).
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`
 (USB/IP codec + localhost server, step 2), `crates/video` (framing, pacing, stats, step 3),

@@ -2,6 +2,25 @@ plugins {
     id("com.android.application")
 }
 
+val workspaceVersion: String = run {
+    val cargoToml = rootProject.projectDir.parentFile.resolve("Cargo.toml")
+    val text = cargoToml.readText()
+    val section = Regex("""(?m)^\[workspace\.package]\s*$([\s\S]*?)(?=^\[|\z)""").find(text)?.groupValues?.get(1)
+    val match = section?.let { Regex("""(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"""").find(it) }
+        ?: throw GradleException("Cannot read X.Y.Z from [workspace.package] version in $cargoToml")
+    match.groupValues.drop(1).joinToString(".")
+}
+val workspaceVersionCode: Int = workspaceVersion.split(".").map { it.toInt() }.let { (major, minor, patch) ->
+    major * 10000 + minor * 100 + patch
+}
+
+val releaseKeystoreFile: String? = System.getenv("HUBBRIDGE_KEYSTORE_FILE")?.takeIf { it.isNotEmpty() }
+val releaseKeystorePassword: String? = System.getenv("HUBBRIDGE_KEYSTORE_PASSWORD")?.takeIf { it.isNotEmpty() }
+val releaseKeyAlias: String? = System.getenv("HUBBRIDGE_KEY_ALIAS")?.takeIf { it.isNotEmpty() }
+val releaseKeyPassword: String? = System.getenv("HUBBRIDGE_KEY_PASSWORD")?.takeIf { it.isNotEmpty() }
+val hasReleaseKey = releaseKeystoreFile != null && releaseKeystorePassword != null &&
+    releaseKeyAlias != null && releaseKeyPassword != null
+
 android {
     namespace = "com.demoz.hubbridge"
     compileSdk = 36
@@ -11,13 +30,32 @@ android {
         applicationId = "com.demoz.hubbridge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = workspaceVersionCode
+        versionName = workspaceVersion
+    }
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(releaseKeystoreFile!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = if (hasReleaseKey) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "WARNING: HUBBRIDGE_KEYSTORE_* variables are not all set, the release APK is signed with the debug key",
+                )
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

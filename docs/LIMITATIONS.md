@@ -165,7 +165,24 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 - A failed or cancelled OUT transfer is counted ("failed to send") and reported; three in a
   row end the bridge.
 
-## 5. Video latency budget (estimate, 1080p60, good 5 GHz Wi-Fi)
+## 5. Released builds
+
+- **The macOS app is not notarized.** It is signed ad hoc (no Apple Developer ID), so a
+  downloaded copy is stopped on its first start ("Not Opened", "Apple could not verify…") until
+  you press **Open Anyway** in System Settings → Privacy & Security, or remove the quarantine
+  flag with `xattr -dr com.apple.quarantine /Applications/HubBridge.app`. The CLI is signed the
+  same way.
+- **macOS may ask for Local Network access again after an update**: an ad-hoc signed app has no
+  stable signing identity. Not yet checked with a real update.
+- **adb after quitting the app:** an adb server started by the packaged app may lose local
+  network access once the app quits (ADB over Wi-Fi stops working until the adb server is
+  restarted, for example with `adb kill-server`). Spawning it "disclaimed" is on the roadmap.
+- **The released phone app is signed with the project's release key.** A development build
+  (debug key) cannot be updated to it in place: uninstall it once, which forgets the paired
+  computers. Later releases update in place.
+- There are no Windows downloads: Windows runs from source.
+
+## 6. Video latency budget (estimate, 1080p60, good 5 GHz Wi-Fi)
 
 capture 5–16 ms + encode 3–10 ms + network 2–10 ms (spikes more) + decode 5–15 ms +
 display 8–16 ms ≈ **30–70 ms glass-to-glass**. 1080p60 H.264 at 10–20 Mbit/s fits any
