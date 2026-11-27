@@ -166,6 +166,13 @@ details[open] summary::before { content: "▾ "; }
 .tree { font-size: 12px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 3px; }
 .tree .l2 { padding-left: 12px; } .tree .l3 { padding-left: 24px; color: var(--text-3); }
 
+/* serial bridge row of a device card */
+.serial { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.serial .sform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.serial label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); }
+.serial input.field { padding: 4px 8px; border-radius: 8px; }
+.serial .counters { color: var(--text-2); }
+
 .toasts { position: fixed; right: 20px; bottom: 20px; z-index: 20; display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
 .toast { background: var(--glass-hi); border: 1px solid var(--line-2); border-left: 3px solid var(--green); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); font-size: 13px; animation: in .2s ease-out; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); user-select: text; -webkit-user-select: text; white-space: pre-wrap; }
 .toast.err { border-left-color: var(--red); }
@@ -223,6 +230,7 @@ details[open] summary::before { content: "▾ "; }
     </div>
   </div>
 </div>
+<datalist id="bauds"><option value="9600"><option value="19200"><option value="38400"><option value="57600"><option value="115200"><option value="230400"><option value="460800"><option value="921600"><option value="1000000"><option value="2000000"><option value="3000000"></datalist>
 <div class="toasts" id="toasts"></div>
 <div class="modal" id="pairModal">
   <div class="sheet">
@@ -263,6 +271,9 @@ const I18N = {
     noDevices: "No USB devices on the phone. Plug a hub or a device into it.", notConnected: "Connect to a phone to see its USB devices.",
     granted: "permission granted", noPerm: "no permission", ask: "Ask phone", details: "Details", hubInfo: "hub info, not forwardable",
     cfg: "config", intf: "interface", ep: "endpoint", since: "since", appV: "app {v}",
+    serialT: "Serial", baudT: "Baud", ptyT: "PTY", tcpT: "TCP port", rfcT: "RFC 2217", startT: "Start", stopT: "Stop", copyT: "Copy",
+    sent: "sent", received: "received", droppedT: "dropped", lineErr: "line errors", stoppedWhy: "Stopped: {r}",
+    pickFront: "Choose a PTY or a TCP port.", badBaud: "Baud rate: a number, e.g. 115200.", badPort: "TCP port: a number from 1 to 65535.",
   },
   ru: {
     network: "В этой сети", byAddress: "Подключиться по IP-адресу", connect: "Подключить", adb: "USB и ADB",
@@ -288,6 +299,9 @@ const I18N = {
     noDevices: "К телефону не подключено USB-устройств. Подключите хаб или устройство.", notConnected: "Подключитесь к телефону, чтобы увидеть его USB-устройства.",
     granted: "разрешение есть", noPerm: "нет разрешения", ask: "Спросить телефон", details: "Подробно", hubInfo: "сведения хаба, не пробрасывается",
     cfg: "конфигурация", intf: "интерфейс", ep: "endpoint", since: "с", appV: "приложение {v}",
+    serialT: "Serial", baudT: "Скорость", ptyT: "PTY", tcpT: "TCP-порт", rfcT: "RFC 2217", startT: "Запустить", stopT: "Остановить", copyT: "Копировать",
+    sent: "отправлено", received: "получено", droppedT: "потеряно", lineErr: "ошибок линии", stoppedWhy: "Остановлено: {r}",
+    pickFront: "Выберите PTY или TCP-порт.", badBaud: "Скорость: число, например 115200.", badPort: "TCP-порт: число от 1 до 65535.",
   },
 };
 const LANG = (navigator.language || "en").toLowerCase().startsWith("ru") ? "ru" : "en";
@@ -439,10 +453,50 @@ function renderConn() {
     <div class="steps"><div class="step"><i>1</i><b>${t("s1")}</b>${t("s1t")}</div><div class="step"><i>2</i><b>${t("s2")}</b>${t("s2t")}</div><div class="step"><i>3</i><b>${t("s3")}</b>${t("s3t")}</div></div></div>`);
 }
 
+// Form values per device, kept here so a re-render does not lose what was typed.
+const SF = {};
+const sf = (id) => (SF[id] ??= { baud: "115200", pty: !!M.pty_supported, tcp: "", rfc: false });
+const num = (n) => Number(n).toLocaleString("en-US").replaceAll(",", " ");
+
+function serialRow(d) {
+  const cap = (M.serial_capable || []).find((c) => c.id === d.id);
+  if (!cap || !d.has_permission) return "";
+  const v = (M.serial || []).find((x) => x.id === d.id);
+  const name = cap.chip ? `${cap.driver} (${cap.chip})` : cap.driver;
+  const busy = (M.busy || []).includes("serial:" + d.id);
+  if (v && v.running) {
+    const where = [
+      v.pty ? `<div class="row"><span>${t("ptyT")}</span><span class="mono sel">${esc(v.pty)}</span>${btn(t("copyT"), data({ act: "copy", text: v.pty }), "small ghost")}</div>` : "",
+      v.tcp ? `<div class="row"><span>TCP</span><span class="mono sel">${esc(v.tcp)}</span>${v.rfc2217 ? `<span class="chip info">${t("rfcT")}</span>` : ""}${btn(t("copyT"), data({ act: "copy", text: v.tcp }), "small ghost")}</div>` : "",
+    ].join("");
+    return `<div class="serial"><div class="row"><b>${t("serialT")}</b><span class="chip ok sel">${esc(v.driver)} · ${esc(v.line)}</span>${v.chip ? `<span class="chip">${esc(v.chip)}</span>` : ""}</div>${where}
+      <div class="counters mono">↑ ${num(v.tx)} ${t("sent")} · ↓ ${num(v.rx)} ${t("received")} · ${num(v.dropped)} ${t("droppedT")} · ${num(v.errors)} ${t("lineErr")}</div>
+      <div class="row">${btn(t("stopT"), data({ act: "serialstop", id: d.id }), "small danger")}</div></div>`;
+  }
+  const f = sf(d.id);
+  const why = v && v.error ? `<div class="err-line">${esc(t("stoppedWhy", { r: v.error }))}</div>` : "";
+  return `<div class="serial"><div class="row"><b>${t("serialT")}</b><span class="chip info">${esc(name)}</span></div>
+    <div class="sform">
+      <label>${t("baudT")} <input class="field mono" style="width:104px" list="bauds" data-sf="baud" data-id="${d.id}" value="${esc(f.baud)}" spellcheck="false"></label>
+      ${M.pty_supported ? `<label><input type="checkbox" data-sf="pty" data-id="${d.id}" ${f.pty ? "checked" : ""}> ${t("ptyT")}</label>` : ""}
+      <label>${t("tcpT")} <input class="field mono" style="width:76px" data-sf="tcp" data-id="${d.id}" value="${esc(f.tcp)}" placeholder="7000" spellcheck="false"></label>
+      <label><input type="checkbox" data-sf="rfc" data-id="${d.id}" ${f.rfc ? "checked" : ""}> ${t("rfcT")}</label>
+      ${btn(t("startT"), data({ act: "serialstart", id: d.id }), "small primary", busy)}
+    </div>${why}</div>`;
+}
+
 function renderDevices() {
+  // Do not replace the cards under the user's cursor while they type in a serial field.
+  const ae = document.activeElement;
+  if (ae && ae.matches && ae.matches("input") && $("devices").contains(ae)) return;
   const list = M.devices;
   $("devCount").textContent = list.length ? String(list.length) : "";
-  if (M.conn.state !== "connected") return put("devices", `<div class="note">${t("notConnected")}</div>`);
+  if (M.conn.state !== "connected") {
+    // A bridge that ended with the connection keeps its reason on screen.
+    const gone = (M.serial || []).filter((v) => !v.running && v.error);
+    return put("devices", `<div class="note">${t("notConnected")}</div>` +
+      gone.map((v) => `<div class="err-line sel">${t("serialT")} ${esc(v.driver)} [${v.id}]: ${esc(t("stoppedWhy", { r: v.error }))}</div>`).join(""));
+  }
   if (!list.length) return put("devices", `<div class="note">${t("noDevices")}</div>`);
   // Real devices first, the hub's own Billboard descriptors last.
   const sorted = [...list].sort((a, b) => (devKind(a) === "info") - (devKind(b) === "info") || a.id - b.id);
@@ -465,7 +519,7 @@ function renderDevices() {
     return `<div class="dev ${billboard ? "dim" : ""}"><div class="head">${icon(kind)}<div style="min-width:0">
         <div class="title sel">${esc(d.product ?? "USB device")}</div><div class="sub sel">${esc(d.manufacturer ?? "")}</div></div></div>
       <div class="row">${chips}</div>
-      <div class="row">${!d.has_permission && !billboard ? btn(t("ask"), data({ act: "grant", id: d.id }), "small primary") : ""}${btn(t("details"), data({ act: "toggle", id: d.id }), "small ghost")}</div>${tree}</div>`;
+      <div class="row">${!d.has_permission && !billboard ? btn(t("ask"), data({ act: "grant", id: d.id }), "small primary") : ""}${btn(t("details"), data({ act: "toggle", id: d.id }), "small ghost")}</div>${serialRow(d)}${tree}</div>`;
   }).join("")}</div>`);
 }
 
@@ -524,8 +578,27 @@ document.addEventListener("click", (e) => {
     case "install": send({ action: "install", serial: d.serial }); break;
     case "adbwifi": send({ action: "adb_wifi", serial: d.serial }); break;
     case "adbwifioff": send({ action: "adb_wifi_off", key: d.key }); break;
+    case "serialstart": {
+      const id = Number(d.id), f = sf(id);
+      const baud = Number(String(f.baud).replace(/\s/g, ""));
+      const tcp = String(f.tcp).trim();
+      const port = tcp === "" ? null : Number(tcp);
+      if (!Number.isInteger(baud) || baud <= 0) return window.onToast("err", t("badBaud"));
+      if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) return window.onToast("err", t("badPort"));
+      const pty = !!M.pty_supported && f.pty;
+      if (!pty && port === null) return window.onToast("err", t("pickFront"));
+      send({ action: "serial_start", id, baud, pty, tcp_port: port, rfc2217: port !== null && f.rfc });
+      break;
+    }
+    case "serialstop": send({ action: "serial_stop", id: Number(d.id) }); break;
+    case "copy": navigator.clipboard && navigator.clipboard.writeText(d.text).then(() => window.onToast("ok", d.text), () => {}); break;
     case "toggle": { const id = Number(d.id); expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderDevices(); break; }
   }
+});
+document.addEventListener("input", (e) => {
+  const el = e.target.closest && e.target.closest("[data-sf]");
+  if (!el) return;
+  sf(Number(el.dataset.id))[el.dataset.sf] = el.type === "checkbox" ? el.checked : el.value;
 });
 $("top").addEventListener("mousedown", (e) => { if (e.button === 0 && !e.target.closest("button,.pill")) send({ action: "drag" }); });
 
