@@ -60,7 +60,7 @@ contents and passwords are passed through files or the environment only; checks 
   - Result (2026-11-28): fmt and clippy clean; `cargo test --workspace`: 188 passed, 0 failed.
 - [x] 6.2 Run `cargo check --target x86_64-pc-windows-msvc -p hubbridge-desktop`; verify it passes or fails only in the known `ring` C build (leave to CI), and after push `ci.yml` is green on macOS, Windows and the APK job
   - Result: CI run 46067816066 green on macOS, Windows and APK.
-- [ ] 6.3 `git status` shows no `dist/`, keystore or `.so` files staged; verify `git diff --cached --stat` lists only the files of this change
+- [x] 6.3 `git status` shows no `dist/`, keystore or `.so` files staged; verify `git diff --cached --stat` lists only the files of this change
   - Result (2026-11-28): nothing is staged (the executor runs no git writes) and `git status` shows no `dist/`, keystore or `.so` files. Check `git diff --cached --stat` at commit time.
 
 ## Workflow follow-up
