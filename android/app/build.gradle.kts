@@ -68,6 +68,11 @@ if (!hasReleaseKey) {
     }
 }
 
+dependencies {
+    // `./gradlew testDebugUnitTest`: the parts of the app without Android types.
+    testImplementation("junit:junit:4.13.2")
+}
+
 // Build the Rust agent core (crates/android) into src/main/jniLibs with cargo-ndk.
 // Skip with -PskipCargo when the .so files are already there (e.g. built by CI).
 val repoRoot = rootProject.projectDir.parentFile

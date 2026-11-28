@@ -48,7 +48,8 @@ class MirrorPresentation(
             addView(video, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
         }
         setContentView(frame)
-        // Android cancels it when the display goes away or its size changes.
+        // Android cancels it when the display goes away or its size changes; [MirrorOutput]
+        // opens a new one for a display that is still there.
         setOnDismissListener { reportLost() }
     }
 

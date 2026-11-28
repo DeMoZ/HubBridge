@@ -8,7 +8,6 @@ import android.os.Build
 import android.util.Log
 import android.view.Surface
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -24,6 +23,7 @@ class MirrorDecoder private constructor(
     private val format: MediaFormat,
     private val surface: Surface,
     private val onOutputError: () -> Unit,
+    private val onFailed: () -> Unit,
 ) {
     private val inputLock = Object()
     private var codec: MediaCodec? = null
@@ -35,8 +35,8 @@ class MirrorDecoder private constructor(
     private val decoded = AtomicLong()
     private val dropped = AtomicLong()
     private val bad = AtomicLong()
-    /** When each picture went in, by its timestamp. */
-    private val queuedAt = ConcurrentHashMap<Long, Long>()
+    private val queuedAt = DecodeTimes()
+    private val outputErrors = OutputRecovery()
     private val timeSumUs = AtomicLong()
     private val timed = AtomicLong()
     @Volatile private var decodeUs = 0L
@@ -74,7 +74,7 @@ class MirrorDecoder private constructor(
     }
 
     /** [QUEUED], [NO_INPUT] (try the same frame again) or [ERROR] (send a keyframe). */
-    fun queue(data: ByteArray, ptsUs: Long, config: Boolean): Int = synchronized(inputLock) {
+    fun queue(data: ByteArray, ptsUs: Long, config: Boolean, keyframe: Boolean): Int = synchronized(inputLock) {
         if (released) return ERROR
         try {
             if (broken) {
@@ -93,7 +93,8 @@ class MirrorDecoder private constructor(
             }
             buffer.clear()
             buffer.put(data)
-            if (!config) queuedAt[ptsUs] = System.nanoTime()
+            if (!config) queuedAt.put(ptsUs, System.nanoTime())
+            if (keyframe) outputErrors.onKeyframeQueued(ptsUs)
             c.queueInputBuffer(index, 0, data.size, ptsUs, if (config) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0)
             QUEUED
         } catch (e: RuntimeException) {
@@ -129,21 +130,30 @@ class MirrorDecoder private constructor(
                 Log.e(TAG, "decoder output failed", e)
                 broken = true
                 bad.incrementAndGet()
-                onOutputError()
+                if (outputErrors.onError()) {
+                    Log.e(TAG, "the keyframe after a decoder error failed too")
+                    onFailed()
+                } else {
+                    onOutputError()
+                }
             }
         }
     }
 
     private fun count(ptsUs: Long) {
         decoded.incrementAndGet()
-        val began = queuedAt.remove(ptsUs) ?: return
+        outputErrors.onPicture(ptsUs)
+        val began = queuedAt.take(ptsUs) ?: return
         timeSumUs.addAndGet((System.nanoTime() - began) / 1000)
         timed.incrementAndGet()
     }
 
-    /** The counters for the host's `VideoStatus`, asked once a second. */
+    /** The counters since this decoder started. */
+    fun counters(): Counters = Counters(decoded.get(), dropped.get(), bad.get())
+
+    /** Average input-to-output time over the last second; asked once a second. */
     @Synchronized
-    fun stats(): String {
+    fun decodeUs(): Long {
         val now = System.nanoTime()
         if (now - averagedAt >= 900_000_000L) {
             averagedAt = now
@@ -151,12 +161,12 @@ class MirrorDecoder private constructor(
             val sum = timeSumUs.getAndSet(0)
             decodeUs = if (n > 0) sum / n else 0
         }
-        return JSONObject()
-            .put("decoded", decoded.get())
-            .put("dropped", dropped.get())
-            .put("bad", bad.get())
-            .put("decode_us", decodeUs)
-            .toString()
+        return decodeUs
+    }
+
+    data class Counters(val decoded: Long = 0, val dropped: Long = 0, val bad: Long = 0) {
+        operator fun plus(other: Counters) =
+            Counters(decoded + other.decoded, dropped + other.dropped, bad + other.bad)
     }
 
     /** Let go of the surface. Calling it again does nothing. */
@@ -173,6 +183,14 @@ class MirrorDecoder private constructor(
         const val QUEUED = 0
         const val NO_INPUT = 1
         const val ERROR = 2
+
+        /** The counters for the host's `VideoStatus`. */
+        fun statsJson(counters: Counters, decodeUs: Long): String = JSONObject()
+            .put("decoded", counters.decoded)
+            .put("dropped", counters.dropped)
+            .put("bad", counters.bad)
+            .put("decode_us", decodeUs)
+            .toString()
         private const val INPUT_TIMEOUT_US = 500_000L
         private const val OUTPUT_TIMEOUT_US = 10_000L
 
@@ -180,14 +198,25 @@ class MirrorDecoder private constructor(
         fun find(width: Int, height: Int): String? = MediaCodecList(MediaCodecList.REGULAR_CODECS)
             .findDecoderForFormat(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height))
 
-        /** A started decoder [name]; throws when the phone refuses. */
-        fun start(name: String, width: Int, height: Int, surface: Surface, onOutputError: () -> Unit): MirrorDecoder {
+        /**
+         * A started decoder [name]; throws when the phone refuses. After an error when taking
+         * pictures out it calls [onOutputError] (a keyframe is needed), or [onFailed] when
+         * the keyframe did not help.
+         */
+        fun start(
+            name: String,
+            width: Int,
+            height: Int,
+            surface: Surface,
+            onOutputError: () -> Unit,
+            onFailed: () -> Unit,
+        ): MirrorDecoder {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             format.setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height * 3 / 2)
             val lowLatency = Build.VERSION.SDK_INT >= 30 && supportsLowLatency(name)
             if (Build.VERSION.SDK_INT >= 30 && lowLatency) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-            val decoder = MirrorDecoder(name, format, surface, onOutputError)
+            val decoder = MirrorDecoder(name, format, surface, onOutputError, onFailed)
             decoder.open()
             Log.i(TAG, "decoder $name for ${width}x$height, low latency ${if (lowLatency) "on" else "off"}")
             return decoder
