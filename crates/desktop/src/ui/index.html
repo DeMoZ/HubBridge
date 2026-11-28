@@ -483,7 +483,7 @@ const I18N = {
     wirelessHelp: "Phone: Developer options → Wireless debugging → Pair device with pairing code. Enter the IP:port and code it shows.",
     pairCode: "Pair with code", adbConnect: "adb connect", usb: "USB devices on the phone",
     pairTitle: "Pair with the phone", pairHelp: "On the phone: HubBridge → Start → Pair a new computer. Enter the 6-digit PIN.",
-    cancel: "Cancel", close: "Close", pair: "Pair", disconnect: "Disconnect", forget: "Forget", online: "online", offline: "offline",
+    cancel: "Cancel", close: "Close", pair: "Pair", disconnect: "Disconnect", forget: "Forget",
     paired: "paired", newAgent: "not paired", noAgents: "No phones found yet. Start HubBridge on the phone (same Wi-Fi).",
     noAdb: "adb is not installed: {hint}. Needed only for the cable, installing the app and ADB over Wi-Fi.",
     noPhones: "No phones over adb. Connect one by USB with USB debugging on, or use wireless debugging below.",
@@ -491,6 +491,9 @@ const I18N = {
     viaAdb: "Connect via ADB", wifiOn: "ADB over Wi-Fi", wifiOff: "Turn off Wi-Fi ADB",
     wifiRefused: "Phone restarted: plug the cable once and turn ADB over Wi-Fi on again.",
     usbT: "USB", wifiT: "Wi-Fi",
+    link_connected_adb: "connected · ADB", link_connected_wifi: "connected · Wi-Fi",
+    link_on_network: "on the network", link_not_seen: "not seen on the network",
+    localNet: "macOS may be blocking HubBridge's Local Network access: allow it in System Settings → Privacy & Security → Local Network.",
     idleTitle: "Connect a phone", idleText: "Pick a phone on the left, or follow the steps.",
     s1: "Install", s1t: "Plug the phone in by USB (debugging on) and press Install app.",
     s2: "Start", s2t: "On the phone: HubBridge → Start: Wi-Fi/LAN + ADB → Pair a new computer.",
@@ -526,7 +529,7 @@ const I18N = {
     wirelessHelp: "Телефон: Параметры разработчика → Отладка по Wi-Fi → Подключить с кодом. Введите показанные IP:порт и код.",
     pairCode: "Сопрячь по коду", adbConnect: "adb connect", usb: "USB-устройства телефона",
     pairTitle: "Сопряжение с телефоном", pairHelp: "На телефоне: HubBridge → Start → Pair a new computer. Введите 6-значный PIN.",
-    cancel: "Отмена", close: "Закрыть", pair: "Сопрячь", disconnect: "Отключить", forget: "Забыть", online: "в сети", offline: "не в сети",
+    cancel: "Отмена", close: "Закрыть", pair: "Сопрячь", disconnect: "Отключить", forget: "Забыть",
     paired: "сопряжён", newAgent: "не сопряжён", noAgents: "Телефоны пока не найдены. Запустите HubBridge на телефоне (та же Wi-Fi сеть).",
     noAdb: "adb не установлен: {hint}. Он нужен только для кабеля, установки приложения и ADB по Wi-Fi.",
     noPhones: "Нет телефонов по adb. Подключите телефон по USB с включённой отладкой или используйте беспроводную отладку ниже.",
@@ -534,6 +537,9 @@ const I18N = {
     viaAdb: "Подключить через ADB", wifiOn: "ADB по Wi-Fi", wifiOff: "Выключить ADB по Wi-Fi",
     wifiRefused: "Телефон перезагружался: один раз подключите кабель и снова включите ADB по Wi-Fi.",
     usbT: "USB", wifiT: "Wi-Fi",
+    link_connected_adb: "подключён · ADB", link_connected_wifi: "подключён · Wi-Fi",
+    link_on_network: "в сети", link_not_seen: "не виден в сети",
+    localNet: "Возможно, macOS не даёт HubBridge доступ к локальной сети: разрешите его в «Системные настройки» → «Конфиденциальность и безопасность» → «Локальная сеть».",
     idleTitle: "Подключите телефон", idleText: "Выберите телефон слева или пройдите шаги.",
     s1: "Установка", s1t: "Подключите телефон по USB (отладка включена) и нажмите «Установить приложение».",
     s2: "Запуск", s2t: "На телефоне: HubBridge → Start: Wi-Fi/LAN + ADB → Pair a new computer.",
@@ -673,9 +679,10 @@ function renderAgents() {
     if (a.paired) actions.push(btn(t("forget"), data({ act: "forget", id: a.agent_id }), "small ghost danger"));
     return `<div class="card ${active ? "active" : ""}">
       <div class="row"><span class="name" title="${esc(a.name)}">${esc(a.name)}</span>
-        <span class="chip ${a.online ? "ok" : ""}">${t(a.online ? "online" : "offline")}</span>
+        <span class="chip ${a.link === "not_seen" ? "" : "ok"}">${t("link_" + a.link)}</span>
         <span class="chip ${a.paired ? "info" : "warn"}">${t(a.paired ? "paired" : "newAgent")}</span></div>
       <div class="sub mono sel" title="${esc(a.addrs[0] ?? "")}">${esc(a.addrs[0] ?? "—")}</div>
+      ${M.macos && a.link === "not_seen" ? `<div class="sub">${t("localNet")}</div>` : ""}
       <div class="row">${actions.join("")}</div></div>`;
   }).join(""));
 }
@@ -687,20 +694,17 @@ function renderPhones() {
   if (a.error) return put("phones", `<div class="note">${esc(a.error)}</div>`);
   if (!a.phones.length) return put("phones", `<div class="note">${t("noPhones")}</div>`);
   put("phones", a.phones.map((p) => {
-    const ready = p.transports.filter((x) => x.state === "device");
-    const usb = ready.find((x) => !x.network);
-    const any = usb || ready[0];
-    const chips = p.transports.map((x) => {
-      const cls = x.state === "device" ? "ok" : "warn";
-      return `<span class="chip ${cls}" title="${esc(x.serial)}">${t(x.network ? "wifiT" : "usbT")}${x.state === "device" ? "" : " · " + esc(x.state)}</span>`;
-    }).join("");
-    const hints = p.transports.filter((x) => x.hint).map((x) => `<div class="sub">${esc(x.hint)}</div>`).join("");
+    const any = p.action_serial;
+    const usb = p.transports.find((x) => !x.network && x.state === "device");
+    const chips = p.links.map((l) =>
+      `<span class="chip ${l.ready ? "ok" : "warn"}" title="${esc(l.serials.join("\n"))}">${t(l.kind === "wifi" ? "wifiT" : "usbT")}${l.ready ? "" : " · " + esc(l.state)}</span>`).join("");
+    const hints = [...new Set(p.transports.map((x) => x.hint).filter(Boolean))].map((h) => `<div class="sub">${esc(h)}</div>`).join("");
     const acts = [];
     if (any) {
-      acts.push(btn(p.app_version ? t("updateApp") : t("installApp"), data({ act: "install", serial: any.serial }), "small" + (p.app_version ? "" : " primary"), M.busy.includes("install:" + any.serial)));
-      if (p.app_version) acts.push(btn(t("viaAdb"), data({ act: "connect", kind: "adb", value: any.serial }), "small"));
+      acts.push(btn(p.app_version ? t("updateApp") : t("installApp"), data({ act: "install", serial: any }), "small" + (p.app_version ? "" : " primary"), M.busy.includes("install:" + any)));
+      if (p.app_version) acts.push(btn(t("viaAdb"), data({ act: "connect", kind: "adb", value: any }), "small"));
     }
-    if (usb && !p.transports.some((x) => x.network && x.state === "device")) acts.push(btn(t("wifiOn"), data({ act: "adbwifi", serial: usb.serial }), "small", M.busy.includes("wifi:" + usb.serial)));
+    if (usb && !p.links.some((l) => l.kind === "wifi" && l.ready)) acts.push(btn(t("wifiOn"), data({ act: "adbwifi", serial: usb.serial }), "small", M.busy.includes("wifi:" + usb.serial)));
     if (p.wifi_addr) acts.push(btn(t("wifiOff"), data({ act: "adbwifioff", key: p.key }), "small ghost"));
     return `<div class="card">
       <div class="row"><span class="name" title="${esc(p.model ?? p.key)}">${esc(p.model ?? p.key)}</span>${chips}</div>

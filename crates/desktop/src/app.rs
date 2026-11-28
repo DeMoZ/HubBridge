@@ -52,6 +52,8 @@ pub struct Model {
     pub serial: Vec<SerialView>,
     /// A PTY can be offered (macOS).
     pub pty_supported: bool,
+    /// Running on macOS (system hints, mirroring).
+    pub macos: bool,
     /// Running actions, e.g. "install:R28M303RHET", "pair", "wifi:R28M303RHET".
     pub busy: BTreeSet<String>,
     /// The app is closing for an update: no APK install, pairing or bridge start may begin.
@@ -154,6 +156,12 @@ impl Model {
         self.closing
     }
 
+    fn refresh_agent_links(&mut self) {
+        for a in &mut self.agents {
+            a.link = agent_link(&a.agent_id, a.online, &self.conn);
+        }
+    }
+
     /// Recompute which devices a serial driver fits.
     fn refresh_serial_capable(&mut self) {
         self.serial_capable = self
@@ -184,6 +192,10 @@ pub struct PhoneView {
     pub key: String,
     pub model: Option<String>,
     pub transports: Vec<TransportView>,
+    /// One entry per link kind (USB, Wi-Fi), whatever number of adb transports stands behind it.
+    pub links: Vec<LinkView>,
+    /// The transport actions use: a ready USB one, then a ready `ip:port`, then any ready one.
+    pub action_serial: Option<String>,
     /// HubBridge version installed on the phone.
     pub app_version: Option<String>,
     /// Saved `ip:5555` for ADB over Wi-Fi.
@@ -201,12 +213,94 @@ pub struct TransportView {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LinkView {
+    /// usb | wifi
+    pub kind: &'static str,
+    /// Any transport of this kind is `device`.
+    pub ready: bool,
+    /// `device`, or the state of the first not-ready transport when none is ready.
+    pub state: String,
+    pub serials: Vec<String>,
+    /// The hint of the first not-ready transport of this kind.
+    pub hint: Option<String>,
+}
+
+/// One link per kind, USB first; a kind without transports is left out.
+fn links(transports: &[TransportView]) -> Vec<LinkView> {
+    [("usb", false), ("wifi", true)]
+        .into_iter()
+        .filter_map(|(kind, network)| {
+            let of_kind: Vec<&TransportView> = transports.iter().filter(|t| t.network == network).collect();
+            let first = of_kind.first()?;
+            let ready = of_kind.iter().any(|t| t.state == "device");
+            let not_ready = of_kind.iter().find(|t| t.state != "device");
+            Some(LinkView {
+                kind,
+                ready,
+                state: if ready {
+                    "device".into()
+                } else {
+                    not_ready.unwrap_or(first).state.clone()
+                },
+                serials: of_kind.iter().map(|t| t.serial.clone()).collect(),
+                hint: not_ready.and_then(|t| t.hint.clone()),
+            })
+        })
+        .collect()
+}
+
+/// `host:port`, as opposed to an mDNS service name of wireless debugging.
+fn is_ip_port(serial: &str) -> bool {
+    serial
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+fn action_serial(transports: &[TransportView]) -> Option<String> {
+    let ready = || transports.iter().filter(|t| t.state == "device");
+    ready()
+        .find(|t| !t.network)
+        .or_else(|| ready().find(|t| is_ip_port(&t.serial)))
+        .or_else(|| ready().next())
+        .map(|t| t.serial.clone())
+}
+
+/// What the "On this network" card says about an agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLink {
+    ConnectedWifi,
+    ConnectedAdb,
+    OnNetwork,
+    #[default]
+    NotSeen,
+}
+
+/// The window's own connection counts first; mDNS only says whether the phone is seen.
+fn agent_link(agent_id: &str, seen: bool, conn: &ConnView) -> AgentLink {
+    if conn.state == "connected" && conn.agent_id.as_deref() == Some(agent_id) {
+        if conn.via.as_deref() == Some("adb") {
+            AgentLink::ConnectedAdb
+        } else {
+            AgentLink::ConnectedWifi
+        }
+    } else if seen {
+        AgentLink::OnNetwork
+    } else {
+        AgentLink::NotSeen
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentView {
     pub agent_id: String,
     pub name: String,
     pub addrs: Vec<String>,
+    /// Seen by the window's mDNS browser (pairing is offered then).
     pub online: bool,
     pub paired: bool,
+    /// Follows the connection as well as mDNS (recomputed after every model change).
+    pub link: AgentLink,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -553,6 +647,7 @@ impl App {
             model: Mutex::new(Model {
                 version: env!("CARGO_PKG_VERSION"),
                 pty_supported: cfg!(target_os = "macos"),
+                macos: cfg!(target_os = "macos"),
                 update: update_view,
                 ..Default::default()
             }),
@@ -596,6 +691,7 @@ impl App {
             let mut m = lock(&self.model);
             f(&mut m);
             m.refresh_serial_capable();
+            m.refresh_agent_links();
         }
         self.push_model();
     }
@@ -668,6 +764,7 @@ impl App {
                 addrs: a.addrs.iter().map(|x| x.to_string()).collect(),
                 online: true,
                 paired: store.key_for(&a.agent_id).is_some(),
+                link: AgentLink::default(),
             });
         }
         for (id, p) in &store.data.agents {
@@ -678,6 +775,7 @@ impl App {
                     addrs: p.last_addr.iter().cloned().collect(),
                     online: false,
                     paired: true,
+                    link: AgentLink::default(),
                 });
             }
         }
@@ -768,12 +866,16 @@ impl App {
                     key,
                     model: d.model.clone(),
                     transports: vec![t],
+                    links: Vec::new(),
+                    action_serial: None,
                     app_version: f.app_version,
                 }),
             }
         }
         for p in &mut phones {
             p.transports.sort_by_key(|t| t.network);
+            p.links = links(&p.transports);
+            p.action_serial = action_serial(&p.transports);
             // Back on the cable: the refused address may work again after "Wi-Fi ADB".
             if p.transports.iter().any(|t| !t.network && t.state == "device")
                 && let Some(a) = &p.wifi_addr
@@ -1580,9 +1682,12 @@ impl App {
             self.stop_all_bridges(&format!("connection to the phone lost: {reason}"))
                 .await;
             self.update(|m| {
+                // Not connected any more: the cards must stop saying so before the next attempt.
+                m.conn.state = "reconnecting".into();
                 m.conn.error = Some(reason);
                 m.devices.clear();
             });
+            self.refresh_agents().await;
         }
     }
 
@@ -1877,6 +1982,103 @@ mod tests {
         assert!(StartGuard::reserve(&set, 8).is_some(), "other devices are independent");
         drop(first);
         assert!(StartGuard::reserve(&set, 7).is_some(), "released when the start ends");
+    }
+
+    fn transport(serial: &str, state: &str) -> TransportView {
+        TransportView {
+            serial: serial.into(),
+            state: state.into(),
+            network: adb::is_network_serial(serial),
+            hint: (state != "device").then(|| adb::state_hint(state).to_string()),
+        }
+    }
+
+    const IP: &str = "192.168.1.108:5555";
+    const MDNS: &str = "adb-R28M303RHET-LfTN6A._adb-tls-connect._tcp.";
+    const USB: &str = "R28M303RHET";
+
+    #[test]
+    fn two_network_transports_give_one_ready_wifi_link() {
+        let got = links(&[transport(IP, "device"), transport(MDNS, "device")]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].kind, got[0].ready, got[0].state.as_str()),
+            ("wifi", true, "device")
+        );
+        assert_eq!(got[0].serials, [IP, MDNS]);
+        assert_eq!(got[0].hint, None);
+    }
+
+    #[test]
+    fn one_ready_and_one_offline_give_one_ready_link_with_the_hint() {
+        let got = links(&[transport(MDNS, "offline"), transport(IP, "device")]);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].ready);
+        assert_eq!(got[0].state, "device");
+        assert_eq!(got[0].hint.as_deref(), Some(adb::state_hint("offline")));
+    }
+
+    #[test]
+    fn an_unauthorized_usb_phone_gives_one_not_ready_usb_link() {
+        let t = [transport(USB, "unauthorized")];
+        let got = links(&t);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].kind, got[0].ready, got[0].state.as_str()),
+            ("usb", false, "unauthorized")
+        );
+        assert_eq!(got[0].hint.as_deref(), Some(adb::state_hint("unauthorized")));
+        assert_eq!(action_serial(&t), None);
+    }
+
+    #[test]
+    fn actions_prefer_usb_then_ip_port_then_mdns() {
+        let all = [
+            transport(MDNS, "device"),
+            transport(IP, "device"),
+            transport(USB, "device"),
+        ];
+        assert_eq!(action_serial(&all).as_deref(), Some(USB));
+        assert_eq!(action_serial(&all[..2]).as_deref(), Some(IP));
+        assert_eq!(action_serial(&all[..1]).as_deref(), Some(MDNS));
+        let usb_not_ready = [transport(USB, "offline"), transport(MDNS, "device")];
+        assert_eq!(action_serial(&usb_not_ready).as_deref(), Some(MDNS));
+    }
+
+    #[test]
+    fn agent_link_follows_the_connection_and_mdns() {
+        let conn = |state: &str, id: &str, via: &str| ConnView {
+            state: state.into(),
+            agent_id: Some(id.into()),
+            via: Some(via.into()),
+            ..ConnView::default()
+        };
+        // Connected over ADB and not seen by mDNS is connected, never "not seen".
+        assert_eq!(
+            agent_link("a", false, &conn("connected", "a", "adb")),
+            AgentLink::ConnectedAdb
+        );
+        assert_eq!(
+            agent_link("a", true, &conn("connected", "a", "wifi")),
+            AgentLink::ConnectedWifi
+        );
+        assert_eq!(
+            agent_link("a", false, &conn("connected", "a", "wifi")),
+            AgentLink::ConnectedWifi
+        );
+        // Another agent's connection, or a connection that is gone, does not count.
+        assert_eq!(
+            agent_link("a", true, &conn("connected", "b", "adb")),
+            AgentLink::OnNetwork
+        );
+        assert_eq!(
+            agent_link("a", true, &conn("reconnecting", "a", "adb")),
+            AgentLink::OnNetwork
+        );
+        assert_eq!(agent_link("a", false, &conn("idle", "a", "adb")), AgentLink::NotSeen);
+        assert_eq!(agent_link("a", false, &ConnView::default()), AgentLink::NotSeen);
+        assert_eq!(serde_json::to_value(AgentLink::ConnectedAdb).unwrap(), "connected_adb");
+        assert_eq!(serde_json::to_value(AgentLink::NotSeen).unwrap(), "not_seen");
     }
 
     #[test]
