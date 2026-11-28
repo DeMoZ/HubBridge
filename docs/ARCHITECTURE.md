@@ -194,9 +194,12 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - **Security:** PIN pairing with SPAKE2 (no offline brute force of the 6-digit PIN), then
   per-session Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s` with the long-term key — mutual
   authentication, encryption, forward secrecy. Details in [PROTOCOL.md](PROTOCOL.md).
-- **Video (step 3):** a second connection. Over Wi-Fi/LAN: QUIC (quinn) with unreliable
-  datagrams for frames, so a lost packet costs one frame, not a head-of-line stall. Over
-  `adb forward`: the same frames on a second TCP stream. Control stays on the first stream.
+- **Video (step 3):** a second TCP connection to the same port, an ordinary resumed session
+  that attaches itself to a mirror stream, for Wi-Fi/LAN and `adb forward` alike. A large
+  frame never waits in front of a ping or a USB reply, there is one code path and no second
+  encryption stack. A stall on Wi-Fi stops the picture; the two-frame acknowledgement window
+  keeps the delay from growing. QUIC with unreliable datagrams (a lost packet would cost one
+  frame, not a stall) stays a later option if measurements call for it.
   WebRTC is not needed: there is no NAT to traverse on a LAN, and its stack is heavy.
 
 ## Repository layout
@@ -211,6 +214,7 @@ HubBridge/
 │   ├── android/               JNI cdylib libhubbridge_android.so (built with cargo-ndk)
 │   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
+│   │   └── src/mirror/        screen mirroring: fit, Annex B, pacing, stats, session, frame sources
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
 │       ├── src/               app.rs (controller), net.rs, update.rs, donations.rs, ui/index.html
 │       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh);
@@ -234,6 +238,6 @@ HubBridge/
 Releases (version, signing, files) are described in [RELEASING.md](RELEASING.md).
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`
-(USB/IP codec + localhost server, step 2), `crates/video` (framing, pacing, stats, step 3),
+(USB/IP codec + localhost server, step 2),
 `os/windows/idd` and `os/macos/` (driver/extension
 projects, step 3).

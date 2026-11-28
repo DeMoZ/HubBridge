@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow, bail};
 use hubbridge_link::{ClientAuth, LinkError, SecureReceiver, SecureSender, client_handshake};
 use hubbridge_proto::{
-    self as proto, AgentInfo, ErrorCode, Frame, MAX_MESSAGE_LEN, Message, Setup, UsbDeviceInfo, UsbStatus,
+    self as proto, AgentInfo, DisplayList, ErrorCode, Frame, MAX_MESSAGE_LEN, Message, Setup, UsbDeviceInfo, UsbStatus,
 };
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
@@ -356,6 +356,42 @@ impl Client {
             rx,
             session: Arc::clone(&self.session),
         })
+    }
+
+    /// Queue an unsolicited frame (`req = 0`), e.g. video on a media session. Same queue,
+    /// order and cancel safety as [`Client::submit`]; nothing answers it.
+    pub async fn send_event(&self, msg: Message) -> Result<()> {
+        let tx = self
+            .tx
+            .as_ref()
+            .expect("the queue is only taken by close, which consumes the client");
+        let permit = tokio::select! {
+            biased;
+            _ = self.session.ended() => return Err(self.session.lost()),
+            p = tx.reserve() => p.map_err(|_| self.session.lost())?,
+        };
+        let bytes = proto::encode(&Frame { req: 0, msg })?;
+        if bytes.len() > MAX_MESSAGE_LEN {
+            return Err(LinkError::TooLarge(bytes.len()).into());
+        }
+        permit.send(bytes);
+        Ok(())
+    }
+
+    /// Completes once the session has ended, for whatever reason. Does not borrow the
+    /// client, so waiting does not keep it from being closed.
+    pub fn closed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let session = Arc::clone(&self.session);
+        async move { session.ended().await }
+    }
+
+    /// The phone's presentation displays; also asks for `DisplaysChanged` events. Only for a
+    /// phone app of at least [`proto::MIRROR_MIN_APP_VERSION`]: an older one drops the session.
+    pub async fn displays(&self) -> Result<DisplayList> {
+        match self.request(Message::GetDisplays).await? {
+            Message::Displays(list) => Ok(list),
+            other => bail!("unexpected reply: {other:?}"),
+        }
     }
 
     /// Send a request and wait for its response.

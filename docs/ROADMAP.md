@@ -50,17 +50,34 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
 
 ## Step 3 — Video / virtual display
 
-1. Media connection: QUIC (quinn) datagrams over LAN, TCP over adb; frame header with
-   timestamps, keyframe requests, stats (FPS, bitrate, encode/network/decode latency).
-2. (b) Capture dongle → PC: UVC on the phone (Camera2 external camera if present, else
+### Step 3a — Mac screen → phone monitor (mirror)
+
+OpenSpec change `mac-screen-to-monitor`.
+
+- [x] Phone display spike on a real phone (2026-11-28): a `Presentation` from the foreground
+      service works with Samsung DeX off, phone unlocked and screen on (LIMITATIONS §2).
+- [x] Protocol: display list and events, mirror start/stop, video frames, acknowledgements,
+      status ([PROTOCOL.md](PROTOCOL.md)); agent streams and video sessions; simulator with
+      fake displays.
+- [x] Media connection: a second TCP session now (Wi-Fi and ADB); QUIC datagrams are a later
+      option. Back-pressure window, keyframe requests, stats (FPS, bitrate, delay, phone
+      decoder); tested without a phone.
+- [ ] macOS: ScreenCaptureKit capture, VideoToolbox low-latency H.264, Screen Recording
+      permission; `hubbridge displays` and `hubbridge mirror`.
+- [ ] Android: display list, `MediaCodec` low-latency decoding onto the monitor.
+- [ ] Desktop window: "Phone displays" panel with Mirror/Stop.
+- [ ] Checks on real hardware, measured delay (LIMITATIONS §6).
+
+### Later
+
+1. (b) Capture dongle → PC: UVC on the phone (Camera2 external camera if present, else
    user-space UVC on usbfs), MJPEG pass-through or `MediaCodec` H.264; host window with
    live stats; then virtual camera (Windows 11 `MFCreateVirtualCamera`, macOS CMIO
    extension).
-3. (a) PC → phone: Windows IddCx virtual monitor (test-signed for dev; evaluate signed
-   Virtual Display Driver first), macOS `CGVirtualDisplay`; capture + hardware encode;
-   phone decodes with `MediaCodec` low-latency onto its screen or a `Presentation` on the
-   hub's HDMI output.
-4. Measure glass-to-glass latency with a flashing test pattern + phone camera.
+2. (a) PC → phone as an extended desktop: Windows IddCx virtual monitor (test-signed for dev;
+   evaluate signed Virtual Display Driver first), macOS `CGVirtualDisplay`; the virtual
+   display feeds the same capture and encode pipeline. Windows capture for mirroring.
+3. Measure glass-to-glass latency with a flashing test pattern + phone camera.
 
 ## Desktop window (pulled forward from step 4) ✅
 
