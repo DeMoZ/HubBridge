@@ -58,6 +58,19 @@ Limits and gotchas:
   DeX models, recent Pixels, some Motorola/Xiaomi/ASUS) or with DisplayLink hubs (through
   DisplayLink's own app). Some phones only mirror, which leaves no secondary display for the
   `Presentation` API.
+- **Measured on a Samsung SM-G970F (Android 12), 2026-11-28**, monitor on the USB-C port and through a
+  charging USB-C hub, picture drawn by a `Presentation` from HubBridge's foreground service:
+  - **Samsung DeX must be off.** With DeX on, the monitor keeps showing the DeX desktop although the app's
+    window on the HDMI display is created and drawing; Android reports no error.
+  - With DeX off the picture stays while HubBridge is in the background or another app is in front.
+  - **The phone must be unlocked with its screen on.** The power button locks the phone and turns the monitor
+    dark; after screen on and unlock the picture comes back by itself. A lock screen with the screen on, and
+    the same with DeX on, were not tested.
+  - Turning DeX off or replugging the monitor brings the display back under a **new display id** and cancels
+    the app's window: the picture has to be started again.
+  - The monitor reported 1280×720@60 while DeX was on and 2560×1600@60 without it (the same monitor, with and
+    without the hub).
+  - H.264 decoder: `OMX.Exynos.avc.dec`, which reports `FEATURE_LowLatency`.
 - **iOS is out of scope**: no general USB host API (only MFi accessories / ExternalAccessory).
 
 ## 3. Network

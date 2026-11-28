@@ -1,7 +1,5 @@
 package com.demoz.hubbridge
 
-import android.app.Activity
-import android.app.ActivityOptions
 import android.app.KeyguardManager
 import android.app.Presentation
 import android.content.BroadcastReceiver
@@ -12,14 +10,12 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Point
-import android.graphics.Rect
 import android.graphics.Typeface
 import android.hardware.display.DisplayManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -27,15 +23,14 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Display
 import android.view.View
-import android.view.WindowInsets
 import android.view.WindowManager
-import java.lang.ref.WeakReference
 
 private const val SPIKE_TAG = "HubBridgeSpike"
 
 /**
- * Throwaway probe (design D1): can HubBridge put its own picture on the phone's external
- * monitor? Reached only through MainActivity's debuggable-build check. Main thread only.
+ * Throwaway probe (design D1): HubBridge's own picture on the phone's external monitor, the
+ * route the spike chose (a Presentation from the service; DeX must be off). Reached only through
+ * MainActivity's debuggable-build check. Main thread only.
  */
 class DisplaySpike(private val context: Context) {
 
@@ -56,22 +51,18 @@ class DisplaySpike(private val context: Context) {
         }
     }
 
-    /** `route` is `s1`, `s3`, `s4` or `stop`. Starting a route removes the one before it. */
+    /** `route` is `s1` or `stop`. Starting it again removes the window before. */
     fun run(route: String) {
         Log.i(SPIKE_TAG, "route $route requested")
         when (route) {
             "stop" -> stop()
-            "s1", "s3", "s4" -> {
+            "s1" -> {
                 removeWindows()
                 watch()
                 logPhoneState("start")
                 logDisplays()
                 logDecoder()
-                when (route) {
-                    "s1" -> showPresentation()
-                    "s3" -> launchActivity(route, presentationDisplay())
-                    else -> launchActivity(route, desktopDisplay())
-                }
+                showPresentation()
             }
             else -> Log.w(SPIKE_TAG, "unknown route $route")
         }
@@ -110,20 +101,10 @@ class DisplaySpike(private val context: Context) {
             presentation = null
             it.dismiss()
         }
-        SpikeActivity.current?.get()?.finishAndRemoveTask()
-        SpikeActivity.current = null
     }
 
     private fun presentationDisplay(): Display? =
         displays.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION).firstOrNull()
-
-    /**
-     * Samsung names the DeX desktop display "Desktop". It was missing from `displays.displays`
-     * on the test phone, so low ids are also asked for one by one.
-     */
-    private fun desktopDisplay(): Display? =
-        (displays.displays.asSequence() + (1..32).asSequence().mapNotNull { displays.getDisplay(it) })
-            .firstOrNull { it.name == "Desktop" }
 
     private fun showPresentation() {
         val display = presentationDisplay()
@@ -145,28 +126,6 @@ class DisplaySpike(private val context: Context) {
             Log.i(SPIKE_TAG, "s1: Presentation shown on ${describe(display)}, isShowing=${p.isShowing}")
         } catch (e: RuntimeException) {
             Log.e(SPIKE_TAG, "s1: cannot show a Presentation on display ${display.displayId}", e)
-        }
-    }
-
-    private fun launchActivity(route: String, display: Display?) {
-        if (display == null) {
-            Log.w(SPIKE_TAG, "$route: no target display")
-            return
-        }
-        val options = ActivityOptions.makeBasic().setLaunchDisplayId(display.displayId)
-        if (route == "s4") {
-            // DeX opens windows; ask for one that covers the whole desktop.
-            val size = realSize(display)
-            options.setLaunchBounds(Rect(0, 0, size.x, size.y))
-        }
-        val intent = Intent(context, SpikeActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
-            .putExtra(SpikeActivity.EXTRA_ROUTE, route)
-        try {
-            context.startActivity(intent, options.toBundle())
-            Log.i(SPIKE_TAG, "$route: activity start requested on ${describe(display)}")
-        } catch (e: RuntimeException) {
-            Log.e(SPIKE_TAG, "$route: cannot start the activity on display ${display.displayId}", e)
         }
     }
 
@@ -265,46 +224,5 @@ private class SpikePatternView(context: Context, private val route: String, priv
             Log.i(SPIKE_TAG, "$route: drawing frame $frames, view ${width}x$height, window on display ${display?.displayId}")
         }
         postInvalidateOnAnimation()
-    }
-}
-
-/** Full-screen test pattern for routes S3 and S4. Not exported. */
-class SpikeActivity : Activity() {
-
-    private var route = "?"
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        route = intent.getStringExtra(EXTRA_ROUTE) ?: "?"
-        current = WeakReference(this)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        @Suppress("DEPRECATION")
-        val shownOn = windowManager.defaultDisplay
-        setContentView(SpikePatternView(this, route, shownOn))
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.insetsController?.hide(WindowInsets.Type.systemBars())
-        }
-        Log.i(SPIKE_TAG, "$route: activity created on ${describe(shownOn)}")
-    }
-
-    override fun onStart() {
-        super.onStart()
-        Log.i(SPIKE_TAG, "$route: activity started")
-    }
-
-    override fun onStop() {
-        Log.i(SPIKE_TAG, "$route: activity stopped")
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        Log.i(SPIKE_TAG, "$route: activity destroyed")
-        if (current?.get() === this) current = null
-        super.onDestroy()
-    }
-
-    companion object {
-        const val EXTRA_ROUTE = "route"
-        var current: WeakReference<SpikeActivity>? = null
     }
 }

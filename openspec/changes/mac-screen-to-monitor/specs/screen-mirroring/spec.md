@@ -134,9 +134,13 @@ the host the reason in words.
 
 ### Requirement: Start refused with a reason
 A start SHALL be refused with a message that says what to do when: the display id is unknown, the display
-already shows a mirror, the phone cannot show a picture on it under its current conditions (as the spike found,
-e.g. the HubBridge app is not open on the phone), the codec or size is unsupported, or the Mac denies Screen
-Recording.
+already shows a mirror, the phone cannot show a picture on it under its current conditions (on Samsung phones:
+Samsung DeX is on, because the monitor then keeps showing the DeX desktop), the codec or size is unsupported, or
+the Mac denies Screen Recording.
+
+#### Scenario: Samsung DeX is on
+- **WHEN** a start targets the monitor while Samsung DeX is on
+- **THEN** the start is refused with a message that says to turn DeX off on the phone and start again, and the phone shows no HubBridge window
 
 #### Scenario: Display already mirrored
 - **WHEN** a second start targets a display that already shows a mirror

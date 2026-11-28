@@ -123,8 +123,8 @@ pattern on the monitor with the phone unlocked and screen on, whatever app is on
 least while HubBridge is open (S3/S4). **NO-GO** when none does: stop the change and report to Roman (the options
 left are the phone's own screen, or DeX window mode).
 
-The rest of the design assumes **S1** (it is what AOSP predicts and needs no permission and no foreground
-activity). If the spike picks S2, the only additions are a phone-side hint text and the DeX flag shown in the
+The spike picked **S2** (see "Spike results"): the `Presentation` of S1, with DeX off. The text below was written
+before the spike. If the spike picks S2, the only additions are a phone-side hint text and the DeX flag shown in the
 window ("switch the monitor to Screen mirroring"); S3 adds the rule "HubBridge must be open on the phone when
 mirroring starts" (start refused with that reason otherwise); S4 changes the target display to the DeX display.
 The Kotlin side keeps one `MirrorSurface` seam (shows a `SurfaceView` on a display, reports surface ready / lost)
@@ -302,8 +302,17 @@ decoder) → `DisplayFailed`.
   `onDismiss` / surface destroyed → `mirrorFailed(SurfaceLost)`.
 - `MirrorDecoder.kt`: the MediaCodec of D4; `onVideoFrame(streamId, bytes, ptsUs, flags): Int` (0 queued,
   1 no input buffer in time, 2 codec error → keyframe request); output thread; counters for `VideoStatus`.
+- Route S2 (spike result): the picture is visible only with Samsung DeX off. While the DeX flag is on, the sink
+  refuses a start with `DisplayFailed`: "Samsung DeX is on: turn DeX off on the phone (the monitor then mirrors
+  the screen), then start again" (on this phone a `Presentation` is created and draws while DeX is on, but the
+  monitor keeps showing DeX, so the platform reports no error by itself). Turning DeX on or off and replugging
+  the monitor can bring the display back under a new id: the running mirror ends (`DisplayRemoved`, or
+  `SurfaceLost` when the `Presentation` is cancelled first), nothing restarts by itself, and the next start uses
+  the id from the new list.
 - Keyguard: `ACTION_SCREEN_OFF` / `ACTION_USER_PRESENT` + `KeyguardManager.isKeyguardLocked` → `setPhoneLocked`;
-  the window then says "the phone is locked: unlock it to see the picture" (AOSP mirrors the phone under keyguard).
+  the window then says "the phone is locked: unlock it to see the picture". On this phone the power button locks
+  the phone and the monitor goes dark; the `Presentation` survives and shows again after unlock, so a lock does
+  not end the mirror by itself. Whether the decoder's surface also survives it is checked on hardware (12.3).
 - Notification while mirroring: "Showing <host>'s screen on <display>"; media sessions are not counted as computers
   in the notification or in `MainActivity`.
 
@@ -372,8 +381,10 @@ all of this; Developer ID signing (roadmap) is the real fix.
 
 ## Risks / Trade-offs
 
-- [Samsung keeps the HDMI output on DeX even when display 8 has content] → spike route order S1–S4; NO-GO stops
-  the change before mirroring code is written.
+- [Samsung keeps the HDMI output on DeX even when the HDMI display has content] → confirmed by the spike: a start
+  is refused while DeX is on (D11), and the window and LIMITATIONS say to turn DeX off.
+- [The display id changes when DeX is toggled or the monitor is replugged] → confirmed by the spike: a mirror ends
+  with its display, ids come from the current list and are never remembered.
 - [The phone locks or its screen goes off while mirroring: the monitor shows the lock screen or goes dark] →
   `FLAG_KEEP_SCREEN_ON` on the presentation window; `phone_locked` shown in the window; documented in LIMITATIONS §2.
   Background/screen-off mirroring is a later stage.
@@ -402,11 +413,39 @@ all of this; Developer ID signing (roadmap) is the real fix.
 
 ## Open Questions
 
-- Whether S1 also keeps the picture with the phone screen off when DeX is on (DeX may keep the HDMI group awake):
-  recorded by the spike; it does not change the stage-1 design, only LIMITATIONS and the phone hint text.
+- Whether a locked phone whose screen is on shows the picture or the lock screen on the monitor (not tested by the
+  spike).
 - Which profile VideoToolbox accepts in low-latency mode on this Mac (D4 handles both).
 
 ## Spike results
 
-(Filled in by the executor after task group 1: route, table of conditions, decoder name and low-latency support,
-GO/NO-GO, date.)
+### 2026-11-28, SM-G970F, Android 12 / API 31
+
+Debug build of the spike (versionName 0.1.0). Route used: `Presentation` from `BridgeService` (`spike s1`).
+Sources: **seen** = Roman looking at the monitor; **dumpsys** and **logcat** = read by the executor.
+
+| Condition | On the monitor | dumpsys / logcat |
+|---|---|---|
+| DeX on (monitor on the USB-C port; HDMI mode 1280×720) | not reported separately by Roman | dumpsys: the HDMI output kept showing layer stack 2 (the DeX desktop, 1600×900) although the Presentation on display 8 was created and drawing |
+| DeX turned off while S1 ran | seen: black until S1 was restarted | the monitor came back as display id 9, 2560×1600@60; the old Presentation was cancelled |
+| DeX off, S1 restarted, HubBridge in front | seen: the pattern with the bar moving | |
+| DeX off, HubBridge sent to the background (Home) | seen: the picture stays, the bar moves, the white border is fully visible | |
+| DeX off, a browser opened in front | seen: the bar keeps moving | |
+| DeX off, phone screen off with the power button (this also locks the phone) | seen: the monitor goes dark | logcat: displays 0 and the HDMI display go to state 1 (off), `SCREEN_OFF keyguardLocked=true`; no cancel or remove; the app stops drawing until the screen is on again |
+| DeX off, screen on and unlocked again | seen: the pattern is back without a restart | logcat: HDMI display back to state 2 (on), `SCREEN_ON keyguardLocked=true`, then `USER_PRESENT`; the same Presentation draws again |
+| Monitor unplugged and reconnected through a USB-C hub with charging | seen: the picture did not come back until S1 was restarted; after the restart it works through the hub | the Presentation was cancelled on removal; display id 9 → 10; 2560×1600@60; phone USB powered and charging; adb over Wi-Fi stayed up |
+| Locked phone with the screen on (lock screen showing) | not tested separately (between screen on and unlock nothing was reported) | |
+| What the monitor shows after the window is removed | not tested | |
+| Routes S3 and S4 | not run (not needed) | |
+
+- **Display ids are not stable**: 8 (DeX on, in the morning), 9 (DeX turned off), 10 (reconnected through the
+  hub). A display id is only valid until the display list changes.
+- **The mode depends on DeX and the connection**: 1280×720@60 with three modes while DeX was on; 2560×1600@60
+  without DeX (USB-C port and hub). A later read-only `dumpsys display` (through the hub) lists five modes:
+  2560×1600@60.01, 1920×1200@59.88, 1280×720@60, 720×480@59.94, 640×480@59.94. The stream stays capped at
+  1920×1080 (D5), so on this 2560×1600 mode the phone's display hardware scales it up; the cap is kept.
+- **Decoder** (logcat, asked for `video/avc` 1280×720): `OMX.Exynos.avc.dec`, `FEATURE_LowLatency=true`.
+
+**GO, route S2** (S1's `Presentation` with Samsung DeX off), decided 2026-11-28. With DeX off the picture stays
+with the phone unlocked and its screen on, whatever app is on the phone screen. With DeX on the monitor keeps
+showing DeX, so a start is refused while DeX is on (D11). Stage 1 needs the phone unlocked with its screen on.

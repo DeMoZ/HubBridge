@@ -15,8 +15,8 @@ pixels, current refresh rate in millihertz, the supported modes (width, height, 
 presentation display, whether it is secure, and whether Samsung DeX is on.
 
 #### Scenario: Monitor on the USB-C port
-- **WHEN** the host asks the phone with a 1280×720@60 monitor on its USB-C port for its displays
-- **THEN** the answer lists one display named as Android names it (e.g. "HDMI Screen") with width 1280, height 720, refresh 60000 mHz, its three supported modes, and the DeX flag as the phone reports it
+- **WHEN** the host asks the phone with a monitor on its USB-C port or hub for its displays
+- **THEN** the answer lists one display named as Android names it (e.g. "HDMI Screen") with the width, height and refresh rate of its current mode as Android reports them at that moment (they and the display id can differ between DeX on and off and after a replug), its supported modes, and the DeX flag as the phone reports it
 
 #### Scenario: No monitor
 - **WHEN** the host asks a phone without an external display

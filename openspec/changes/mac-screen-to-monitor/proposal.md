@@ -15,7 +15,8 @@ ADB.
 
 - **Spike first (go/no-go).** On the real phone (Samsung SM-G970F, Android 12, monitor on the USB-C port, Samsung
   DeX active) find out whether HubBridge can show its own picture on the HDMI display, and under which conditions
-  (DeX on or off, phone screen on or off, app in the foreground or not). Today's read-only `dumpsys` shows the
+  (DeX on or off, phone screen on or off, app in the foreground or not). Result (design.md, "Spike results"): GO
+  with Samsung DeX off; with the phone locked or its screen off the monitor goes dark. Before the spike a read-only `dumpsys` showed the
   HDMI output showing DeX's 1600×900 desktop and the "HDMI Screen" display (id 8, 1280×720@60, a presentation
   display) without content of its own. Mirroring is built only after a route is found; no route = stop and decide.
 - **Phone displays.** The phone app watches Android's presentation displays and reports them (id, name, current

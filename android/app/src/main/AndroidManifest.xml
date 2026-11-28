@@ -39,15 +39,6 @@
                 android:resource="@xml/device_filter" />
         </activity>
 
-        <!-- Display spike, routes S3 and S4 (temporary). -->
-        <activity
-            android:name=".SpikeActivity"
-            android:exported="false"
-            android:taskAffinity="com.demoz.hubbridge.spike"
-            android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboard|keyboardHidden|navigation"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
-
         <service
             android:name=".BridgeService"
             android:exported="false"
