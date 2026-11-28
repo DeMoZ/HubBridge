@@ -152,6 +152,9 @@ pub donate: DonateView,   // loading, offline, info: Option<donations::Info>
 - The macOS script deletes what is at the app's place only after the current app was really moved
   to `HubBridge.app.old` (not when a leftover `.old` is still there): a partial app from a failed
   move across volumes is removed and the old one restored; otherwise the app is not touched.
+- Known exception to "the previous app SHALL be put back": the Windows script copies over the
+  installed folder without a backup, so a copy that fails partway is not restored. No Windows
+  file is published; `docs/ROADMAP.md` requires the backup before one is.
 - The Windows script is written with a UTF-8 byte order mark (Windows PowerShell 5.1 would read
   it in the ANSI code page), and `ps_quote` also doubles the typographic single quotes.
 - Order: download + verify + unpack (window keeps working, status `updDownloading`) →
