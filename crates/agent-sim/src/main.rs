@@ -13,16 +13,25 @@
 //! permission, 1004 flash drive, 1005 FT232R, 1006 FT2232H (two ports), 1007 FT232H,
 //! 1008 CH340, 1009 CDC-ACM. The UART adapters and the CDC device answer their chip's control
 //! requests and loop bulk data back, so `hubbridge serial <id>` works against each.
+//!
+//! Displays and mirroring: `--display "HDMI Screen:1280x720@60"` (repeatable, ids from 8)
+//! adds fake monitors that accept mirror streams; the video is checked, not shown.
+//! `--video-out <file.h264>` keeps the received stream, `--decode-delay-ms` makes the decoder
+//! slow, `--display-churn <s>` unplugs and replugs the first display, `--lock-after <s>`
+//! reports the phone as locked.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hubbridge_agent::fake::{FakeKind, FakeUsb, SerialChip};
+use hubbridge_agent::fake::{FakeKind, FakeUsb, FakeVideoSink, SerialChip};
 use hubbridge_agent::{Agent, AgentCallbacks, AgentConfig};
-use hubbridge_proto::{DEFAULT_PORT, MDNS_SERVICE_TYPE, PROTO_VERSION, fixtures};
+use hubbridge_proto::{
+    DEFAULT_PORT, DisplayInfo, DisplayList, DisplayMode, MDNS_SERVICE_TYPE, PROTO_VERSION, fixtures,
+};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use tracing::info;
 
@@ -51,6 +60,112 @@ struct Args {
     /// Do not announce on mDNS.
     #[arg(long)]
     no_mdns: bool,
+    /// A fake display, "<name>:<width>x<height>@<hz>"; repeatable, ids from 8.
+    #[arg(long = "display", value_parser = parse_display)]
+    displays: Vec<FakeDisplay>,
+    /// Every N seconds unplug/replug the first fake display.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    display_churn: Option<u64>,
+    /// Time the fake video decoder needs per frame.
+    #[arg(long, default_value_t = 0)]
+    decode_delay_ms: u64,
+    /// Write the received video stream (H.264 Annex B) to this file.
+    #[arg(long)]
+    video_out: Option<PathBuf>,
+    /// Report the phone as locked after N seconds.
+    #[arg(long)]
+    lock_after: Option<u64>,
+}
+
+/// Android gives external displays ids like these.
+const FIRST_DISPLAY_ID: u32 = 8;
+
+#[derive(Debug, Clone, PartialEq)]
+struct FakeDisplay {
+    name: String,
+    width: u32,
+    height: u32,
+    hz: f64,
+}
+
+fn parse_display(spec: &str) -> Result<FakeDisplay, String> {
+    let wrong = || format!("`{spec}` is not <name>:<width>x<height>@<hz>");
+    let (name, mode) = spec.rsplit_once(':').ok_or_else(wrong)?;
+    let (size, hz) = mode.split_once('@').ok_or_else(wrong)?;
+    let (width, height) = size.split_once('x').ok_or_else(wrong)?;
+    let width: u32 = width.parse().map_err(|_| wrong())?;
+    let height: u32 = height.parse().map_err(|_| wrong())?;
+    let hz: f64 = hz.parse().map_err(|_| wrong())?;
+    if name.is_empty() || width == 0 || height == 0 || !(hz > 0.0 && hz <= 1000.0) {
+        return Err(wrong());
+    }
+    Ok(FakeDisplay {
+        name: name.to_string(),
+        width,
+        height,
+        hz,
+    })
+}
+
+/// The list the agent reports; `first_present` is false while the first display is unplugged.
+fn display_list(displays: &[FakeDisplay], first_present: bool) -> DisplayList {
+    let displays = displays
+        .iter()
+        .zip(FIRST_DISPLAY_ID..)
+        .skip(usize::from(!first_present))
+        .map(|(d, id)| {
+            let refresh_mhz = (d.hz * 1000.0).round() as u32;
+            DisplayInfo {
+                id,
+                name: d.name.clone(),
+                width: d.width,
+                height: d.height,
+                refresh_mhz,
+                modes: vec![DisplayMode {
+                    width: d.width,
+                    height: d.height,
+                    refresh_mhz,
+                }],
+                presentation: true,
+                secure: false,
+            }
+        })
+        .collect();
+    DisplayList {
+        displays,
+        desktop_mode: false,
+    }
+}
+
+/// One line per second for every stream that took frames or is still running.
+async fn print_video(sink: Arc<FakeVideoSink>) {
+    let mut before = std::collections::BTreeMap::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        for (stream, log) in sink.logs() {
+            let last = before.insert(stream, log.clone()).unwrap_or_default();
+            if log.stops > 0 {
+                if last.stops == 0 {
+                    info!(
+                        display = log.display_id,
+                        decoded = log.decoded,
+                        bad = log.bad,
+                        "mirror stopped"
+                    );
+                }
+                continue;
+            }
+            info!(
+                display = log.display_id,
+                fps = log.decoded - last.decoded,
+                decoded = log.decoded,
+                keyframes = log.keyframes,
+                bad = log.bad,
+                "mirror"
+            );
+        }
+    }
 }
 
 struct Log;
@@ -160,6 +275,34 @@ async fn main() -> Result<()> {
     );
     agent.set_usb_backend(usb);
 
+    agent.set_displays(display_list(&args.displays, true));
+    let video = Arc::new(FakeVideoSink::default());
+    video.set_delay(Duration::from_millis(args.decode_delay_ms));
+    video.set_output(args.video_out.clone());
+    agent.set_video_sink(video.clone());
+    tokio::spawn(print_video(video));
+    if let Some(secs) = args.display_churn {
+        let agent = agent.clone();
+        let displays = args.displays.clone();
+        tokio::spawn(async move {
+            let mut present = true;
+            loop {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                present = !present;
+                info!(first_display = present, "churn: display list changed");
+                agent.set_displays(display_list(&displays, present));
+            }
+        });
+    }
+    if let Some(secs) = args.lock_after {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            info!("the phone is now \"locked\"");
+            agent.set_phone_locked(true);
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind {}", args.listen))?;
@@ -233,4 +376,39 @@ fn announce(agent: &Agent, port: u16, ipv6: bool) -> Result<ServiceDaemon> {
     .enable_addr_auto();
     daemon.register(info)?;
     Ok(daemon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_argument() {
+        let d = parse_display("HDMI Screen:1280x720@60").unwrap();
+        assert_eq!(
+            d,
+            FakeDisplay {
+                name: "HDMI Screen".into(),
+                width: 1280,
+                height: 720,
+                hz: 60.0
+            }
+        );
+        assert_eq!(parse_display("a:b:640x480@59.94").unwrap().name, "a:b");
+        for bad in [
+            "HDMI Screen:1280x720",
+            "HDMI Screen",
+            ":1280x720@60",
+            "x:0x720@60",
+            "x:1280x0@60",
+            "x:1280x720@0",
+            "x:1280@60",
+            "x:1280x720@NaN",
+        ] {
+            assert!(parse_display(bad).is_err(), "{bad}");
+        }
+        let list = display_list(&[d.clone(), d], false);
+        assert_eq!(list.displays.len(), 1);
+        assert_eq!((list.displays[0].id, list.displays[0].refresh_mhz), (9, 60_000));
+    }
 }

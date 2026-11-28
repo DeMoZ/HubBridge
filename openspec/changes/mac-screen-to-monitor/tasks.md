@@ -55,7 +55,7 @@ signature mismatch, stop and ask Roman — an uninstall forgets the paired compu
 
 ## 6. Simulator (D15)
 
-- [ ] 6.1 Add `--display "<name>:<w>x<h>@<hz>"` (repeatable; ids from 8 upward, one mode each), `--display-churn <s>`, `--decode-delay-ms <n>`, `--video-out <file.h264>` and `--lock-after <s>` to `crates/agent-sim`, wiring `FakeVideoSink`; print per-second sink stats while a stream runs; update the simulator's module doc; verify a manual run (`hubbridge-agent-sim --pin 123456 --state-dir <scratch> --listen 127.0.0.1:<port> --no-mdns --display "HDMI Screen:1280x720@60"`) starts, and a unit test of the `--display` parser (valid, missing `@`, zero size)
+- [x] 6.1 Add `--display "<name>:<w>x<h>@<hz>"` (repeatable; ids from 8 upward, one mode each), `--display-churn <s>`, `--decode-delay-ms <n>`, `--video-out <file.h264>` and `--lock-after <s>` to `crates/agent-sim`, wiring `FakeVideoSink`; print per-second sink stats while a stream runs; update the simulator's module doc; verify a manual run (`hubbridge-agent-sim --pin 123456 --state-dir <scratch> --listen 127.0.0.1:<port> --no-mdns --display "HDMI Screen:1280x720@60"`) starts, and a unit test of the `--display` parser (valid, missing `@`, zero size)
 
 ## 7. Host: client additions and the mirror session (D6, D7, D12)
 
