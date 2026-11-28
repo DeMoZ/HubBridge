@@ -8,9 +8,34 @@ Android agent (Kotlin + Rust core) · desktop app for macOS and Windows (Rust) �
 
 [Русская версия](README.ru.md)
 
-> Status: **step 1 of 4** — discovery, PIN pairing, encrypted sessions, USB device list
-> with descriptors, hot-plug events and RTT over Wi-Fi/LAN and `adb forward`. USB data
-> forwarding, video and the tray app come next ([roadmap](docs/ROADMAP.md)).
+> Status: **first release, v0.1.0** (macOS and Android) — discovery, PIN pairing, encrypted
+> sessions, USB device list with descriptors, hot-plug events and RTT over Wi-Fi/LAN and
+> `adb forward`, a desktop window and a serial bridge (not yet tried with real adapters).
+> More USB forwarding, video and the tray app come next ([roadmap](docs/ROADMAP.md)).
+
+## Install
+
+Download from [Releases](https://github.com/DeMoZ/HubBridge/releases). macOS builds are for
+Apple Silicon (macOS 11+). There are no Windows downloads yet: on Windows, run HubBridge from
+source only.
+
+1. **macOS app.** Open `HubBridge-macOS-v<version>.dmg` and drag HubBridge to Applications.
+   The app is signed ad hoc and not notarized, so on the first start macOS shows
+   **"HubBridge" Not Opened** ("Apple could not verify…"). Press **Done**, open
+   **System Settings → Privacy & Security** and press **Open Anyway** next to HubBridge (once
+   per download). Or remove the download flag:
+   `xattr -dr com.apple.quarantine /Applications/HubBridge.app`.
+2. **Local network.** When macOS asks whether HubBridge may find devices on local networks,
+   press **Allow**; without it the window does not find the phone.
+3. **Phone app** (Android 8.0+). With USB debugging on, plug the phone in and press
+   **Install app** in the window; the app is bundled inside. Or install
+   `HubBridge-<version>.apk` yourself (`adb install HubBridge-<version>.apk`). A development
+   build signed with another key must be uninstalled first, which forgets its paired
+   computers.
+
+**Command line only:** `hubbridge-<version>-macos-arm64.tar.gz` holds the `hubbridge` tool with
+`HubBridge.apk` next to it, so `./hubbridge install-apk` works without options. If macOS
+refuses to run it: `xattr -d com.apple.quarantine hubbridge`.
 
 ## How it works
 

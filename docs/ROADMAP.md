@@ -78,10 +78,11 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
       from the redesign).
 - [ ] Android control screen in the desktop's visual language (a new view layer; the launcher
       icon already uses the new mark).
-- [ ] Tray icon, launch at login, `.app` / installer packaging (macOS needs
-      `NSLocalNetworkUsageDescription` + `NSBonjourServices = _hubbridge._tcp` in Info.plist,
-      and the adb server should be spawned "disclaimed" so it keeps network access after the
-      app quits — see UniversalKM `DisclaimedSpawn.swift`).
+- [x] `.app` packaging for macOS (`scripts/build-macos.sh`): `.dmg`, update zip, icon,
+      `NSLocalNetworkUsageDescription` and `NSBonjourServices = _hubbridge._tcp` in Info.plist,
+      published by `release.yml` on a version tag.
+- [ ] Tray icon, launch at login, and spawning the adb server "disclaimed" so it keeps network
+      access after the app quits (see UniversalKM `DisclaimedSpawn.swift`).
 - [ ] More languages than en/ru; settings page.
 
 ## Step 4 — Reliability and UX
@@ -94,10 +95,13 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
   graph, logs; keys in Keychain / Credential Manager.
 - **"Install on phone" button** in the desktop app: lists phones from `adb devices -l`,
   installs/updates the bundled APK and opens it (`hubbridge_host::install::install`,
-  already behind `hubbridge install-apk`). Desktop release archives ship `HubBridge.apk`
-  next to the executable (macOS: `Contents/Resources`); later, download the matching APK
-  from the GitHub release when it is not bundled.
+  already behind `hubbridge install-apk`).
+  - [x] Desktop release archives ship `HubBridge.apk` next to the executable (macOS:
+        `Contents/Resources`).
+  - [ ] Later, download the matching APK from the GitHub release when it is not bundled.
 - Structured logs on both ends with export; diagnostic bundle.
 - Android: battery-optimization exemption flow, Quick Settings tile, "keep screen on" mode,
   PIN-less pairing over ADB (the host pushes a one-time secret with `adb shell`).
-- Updates and Support button like the other DeMoZ apps; signed release builds.
+- Updates and Support button like the other DeMoZ apps.
+- Signed release builds: the APK is signed with the release key; the macOS app is only ad-hoc
+  signed (Developer ID signing and notarization are open).
