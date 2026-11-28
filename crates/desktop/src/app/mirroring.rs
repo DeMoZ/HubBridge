@@ -121,17 +121,20 @@ impl App {
         }
     }
 
-    /// Whether a mirror runs or is starting.
-    fn mirror_taken(&self) -> bool {
-        lock(&self.mirror).is_some() || lock(&self.model).busy.contains(BUSY)
-    }
-
     pub(super) async fn mirror_start(self: &Arc<Self>, display_id: u32, fps: u32) {
-        if self.mirror_taken() {
-            self.toast("err", "A mirror is already running or starting.");
-            return;
-        }
-        if !self.claim_busy(BUSY) {
+        // Checked and claimed under one lock: two quick presses must not start two mirrors.
+        let (mut taken, mut claimed) = (false, false);
+        self.update(|m| {
+            taken = m.busy.contains(BUSY) || lock(&self.mirror).is_some();
+            claimed = !taken && m.begin_action(BUSY);
+        });
+        if !claimed {
+            let why = if taken {
+                "A mirror is already running or starting."
+            } else {
+                "The app is restarting to update."
+            };
+            self.toast("err", why);
             return;
         }
         self.start_claimed(display_id, fps).await;
@@ -203,9 +206,12 @@ impl App {
         }
         let config = handle.config();
         self.update(|m| {
-            m.mirror.state = MirrorState::Running;
-            m.mirror.display_name = Some(handle.display().name.clone());
-            m.mirror.size = Some(format!("{}×{}", config.width, config.height));
+            // A Stop or a disconnect may have taken the mirror out just now.
+            if lock(&self.mirror).as_ref().is_some_and(|h| Arc::ptr_eq(h, &handle)) {
+                m.mirror.state = MirrorState::Running;
+                m.mirror.display_name = Some(handle.display().name.clone());
+                m.mirror.size = Some(format!("{}×{}", config.width, config.height));
+            }
         });
         let me = Arc::clone(self);
         self.rt.spawn(async move { me.follow_mirror(handle).await });

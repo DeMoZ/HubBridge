@@ -185,7 +185,9 @@ fn main_display() -> Result<Retained<SCDisplay>> {
                 .iter()
                 .find(|d| unsafe { d.displayID() } == id)
                 .map(Handoff)
-                .ok_or_else(|| "the main display cannot be captured".to_string()),
+                .ok_or_else(|| {
+                    "the main display cannot be captured (is the Mac's screen locked or asleep?)".to_string()
+                }),
             None => Err(describe(error).unwrap_or_else(|| "no content to capture".into())),
         };
         let _ = tx.send(found);

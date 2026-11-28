@@ -201,6 +201,9 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
   - macOS 15 and later ask again about once a month.
   - For development, a binary started from Terminal or Orca is covered by **that app's**
     permission, not by HubBridge's.
+- **A mirror cannot start while the Mac's screen is locked and its display is off**: macOS
+  offers no display to capture (seen on macOS 27). What a running mirror does when the Mac locks
+  was not tested.
 - **adb after quitting the app:** an adb server started by the packaged app may lose local
   network access once the app quits (ADB over Wi-Fi stops working until the adb server is
   restarted, for example with `adb kill-server`). Spawning it "disclaimed" is on the roadmap.
