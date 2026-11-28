@@ -90,7 +90,11 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Key store `host.json` in the user config dir, owner-only permissions (Keychain /
   Credential Manager in step 4).
 - Step 1 front end is the `hubbridge` CLI (`discover`, `pair`, `info`, `devices`, `grant`,
-  `ping`, `watch`, `adb`, `agents`, `forget`). Step 4 adds a tray app on tao + wry +
+  `ping`, `watch`, `adb`, `agents`, `forget`, `usb`, `serial`, `displays`, `mirror`).
+- `mirror/`: the screen mirror. `fit` (stream size), `pace` (at most two frames unacknowledged,
+  latest picture wins, keyframe rules), `stats`, `annexb`, `session` (the second connection),
+  frame sources (`macos/`: ScreenCaptureKit + VideoToolbox; `test_pattern`: a built-in clip;
+  `synthetic`: fake frames for tests) and `cli` (the two commands). Step 4 adds a tray app on tao + wry +
   tray-icon (same stack as UsbMemoryChecker / 360Cleaner), talking to the same library.
 - Targets macOS and Windows (the phone side is Android). There is no Linux platform.
 
@@ -123,6 +127,24 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
   config folder (or in `HUBBRIDGE_HOME`); the update download (`HubBridge-update-<version>`,
   removed after the install or when it fails) and the replace script (`HubBridge-update.sh` /
   `.ps1`) are in the system temp folder.
+- **Phone displays and mirroring** (`app/mirroring.rs`): the right column shows "Phone displays"
+  between the connection and the USB devices. `Model.displays` (`DisplaysView`: `supported`, the
+  list, the DeX flag) is filled after a connect, only when the phone app passes the version gate, and
+  follows `DisplaysChanged`. `Model.mirror` is a `MirrorView` (`idle | starting | running | stopped |
+  failed`, display, stream size, fps, the readout, the reason, `phone_locked`, and `permission`, a
+  counter that makes the page open the Screen Recording sheet when it grows). Requests:
+  `mirror_start {display_id, fps}`, `mirror_stop`, `open_screen_settings`. The last one opens only
+  the fixed address `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`
+  with `/usr/bin/open`; the page cannot pass another. A start checks the Screen Recording permission
+  first; "mirror" is a busy key that is refused once the app closes for an update, and an update waits
+  for a start in progress like for a starting bridge. The readout reaches the model once a second.
+  A disconnect, a quit (`LoopDestroyed`) and an update stop the mirror before the session closes; a
+  lost connection ends it with its reason, and a reconnect does not start it again. One mirror at a
+  time. Capture and encoder callbacks run on their own queues and never touch the WebView. On
+  Windows the panel lists the displays and says that mirroring needs macOS for now.
+- In a checkout on a case-insensitive disk (the macOS default) `target/debug/hubbridge` (CLI) and
+  `target/debug/HubBridge` (window) are one file: the package built last wins. Build the one you are
+  about to run (`cargo run -p hubbridge-host -- …` / `cargo run -p hubbridge-desktop`).
 - Updating works only in a release build that runs from `HubBridge.app` (or the `.exe` folder on
   Windows). It is refused while the phone app is being installed or a pairing runs. After the last
   such check no APK install, pairing or bridge start can begin; bridges still starting are waited
@@ -218,7 +240,8 @@ HubBridge/
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
 │   │   └── src/mirror/        screen mirroring: fit, Annex B, pacing, stats, session, frame sources
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
-│       ├── src/               app.rs (controller), net.rs, update.rs, donations.rs, ui/index.html
+│       ├── src/               app.rs (controller), app/mirroring.rs, net.rs, update.rs, donations.rs,
+│       │                      ui/index.html
 │       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh);
 │                              donations.json: built-in copy of the Support list
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)

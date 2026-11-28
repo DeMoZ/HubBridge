@@ -5,13 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use hubbridge_host::discovery::{Browser, DiscoveredAgent};
 use hubbridge_host::install::{self, InstallOptions};
+use hubbridge_host::mirror::MirrorHandle;
 use hubbridge_host::serial::bridge::{BridgeHandle, BridgeOptions, SerialBridge};
 use hubbridge_host::serial::{self, Flow, Line, SerialConfig};
 use hubbridge_host::{Client, ClientEvent, Store, adb};
@@ -22,6 +23,9 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 
 use crate::{donations, net, update};
+
+mod mirroring;
+use mirroring::{DisplaysView, MirrorView};
 
 /// Sends a script to the page (the window lives on the main thread).
 pub type Push = Arc<dyn Fn(String) + Send + Sync>;
@@ -61,6 +65,10 @@ pub struct Model {
     closing: bool,
     pub update: UpdateView,
     pub donate: DonateView,
+    /// The phone's displays, while connected.
+    pub displays: DisplaysView,
+    /// The screen mirror: running, or why it ended.
+    pub mirror: MirrorView,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -399,6 +407,14 @@ pub enum Request {
     OpenUrl {
         url: String,
     },
+    /// Mirror this computer's screen onto a display of the phone.
+    MirrorStart {
+        display_id: u32,
+        fps: u32,
+    },
+    MirrorStop,
+    /// The Screen Recording page of System Settings (a fixed address).
+    OpenScreenSettings,
     Drag,
 }
 
@@ -569,6 +585,10 @@ pub struct App {
     bridges: Mutex<HashMap<u32, Arc<BridgeHandle>>>,
     /// Devices whose bridge is being started (the id is taken before the first await).
     starting: Mutex<BTreeSet<u32>>,
+    /// The running mirror.
+    mirror: Mutex<Option<Arc<MirrorHandle>>>,
+    /// Grows when a mirror is stopped from outside; a start made before is then dropped.
+    mirror_generation: AtomicU64,
     exit: Exit,
     /// The newer release the last check found.
     release: Mutex<Option<update::Release>>,
@@ -663,6 +683,8 @@ impl App {
             browser: Mutex::new(None),
             bridges: Mutex::new(HashMap::new()),
             starting: Mutex::new(BTreeSet::new()),
+            mirror: Mutex::new(None),
+            mirror_generation: AtomicU64::new(0),
             exit,
             release: Mutex::new(None),
             donations: Mutex::new(donations::cached()),
@@ -1055,6 +1077,15 @@ impl App {
             }
             Request::DonateOpen { lang } => self.donate_open(lang),
             Request::OpenUrl { url } => self.open_url(&url),
+            Request::MirrorStart { display_id, fps } => {
+                let me = Arc::clone(self);
+                self.rt.spawn(async move { me.mirror_start(display_id, fps).await });
+            }
+            Request::MirrorStop => {
+                let me = Arc::clone(self);
+                self.rt.spawn(async move { me.stop_mirror(None).await });
+            }
+            Request::OpenScreenSettings => self.open_screen_settings(),
             Request::Drag => {}
         }
     }
@@ -1153,6 +1184,7 @@ impl App {
             }
             // A bridge that is still starting has to be registered before it can be stopped.
             wait_for_starts(&me.starting, STARTING_WAIT).await;
+            me.wait_for_mirror_start().await;
             me.stop_all_bridges("the app is updating").await;
             me.disconnect_and_wait().await;
             match update::start_install(&source, &target) {
@@ -1184,6 +1216,8 @@ impl App {
     /// Disconnect and let the session say goodbye before the app quits.
     async fn disconnect_and_wait(&self) {
         *lock(&self.manual_idle) = true;
+        // First, while the session is still there to tell the phone.
+        self.stop_mirror(None).await;
         let task = lock(&self.conn_task).take();
         if let Some(h) = task {
             h.abort();
@@ -1562,6 +1596,8 @@ impl App {
     }
 
     fn stop_connection(&self) {
+        // The mirror first: the phone is told before the session closes (below).
+        let mirror = self.take_mirror(None);
         if !lock(&self.bridges).is_empty() {
             // Serial bridges need the session: they end with it.
             let ids: Vec<u32> = lock(&self.bridges).keys().copied().collect();
@@ -1589,9 +1625,13 @@ impl App {
         if let Some(h) = lock(&self.conn_task).take() {
             h.abort();
         }
-        if let Some(c) = lock(&self.client).take() {
+        let client = lock(&self.client).take();
+        if mirror.is_some() || client.is_some() {
             self.rt.spawn(async move {
-                if let Ok(c) = Arc::try_unwrap(c) {
+                if let Some(m) = mirror {
+                    m.stop().await;
+                }
+                if let Some(c) = client.and_then(Arc::into_inner) {
                     c.close().await;
                 }
             });
@@ -1606,6 +1646,7 @@ impl App {
                 ..Default::default()
             };
             m.devices.clear();
+            m.displays = DisplaysView::default();
         });
     }
 
@@ -1654,6 +1695,7 @@ impl App {
 
             let info = client.agent_info().await.ok();
             let devices = client.list_devices().await.unwrap_or_default();
+            let displays = self.fetch_displays(&client, info.as_ref()).await;
             let via = if client.addr.ip().is_loopback() { "adb" } else { "wifi" };
             {
                 let mut s = lock(&self.settings);
@@ -1674,10 +1716,13 @@ impl App {
                 m.conn.error = None;
                 m.conn.since_ms = now_ms();
                 m.devices = devices;
+                m.displays = displays;
             });
             self.refresh_agents().await;
 
             let reason = self.session_loop(&client).await;
+            // A mirror ends with its connection, and says so; it is not started again.
+            self.tell_mirror(&ClientEvent::Disconnected(reason.clone()));
             *lock(&self.client) = None;
             self.stop_all_bridges(&format!("connection to the phone lost: {reason}"))
                 .await;
@@ -1686,6 +1731,7 @@ impl App {
                 m.conn.state = "reconnecting".into();
                 m.conn.error = Some(reason);
                 m.devices.clear();
+                m.displays = DisplaysView::default();
             });
             self.refresh_agents().await;
         }
@@ -1737,6 +1783,10 @@ impl App {
                         self.stop_bridge(id, Some(format!("device closed on the phone: {reason}"))).await;
                     }
                     Some(ClientEvent::Message(Message::DeviceList { devices })) => self.update(|m| m.devices = devices),
+                    Some(ClientEvent::Message(Message::DisplaysChanged(list))) => {
+                        self.update(|m| m.displays = DisplaysView::from_list(list));
+                    }
+                    Some(ev @ ClientEvent::Message(Message::MirrorStopped { .. })) => self.tell_mirror(&ev),
                     Some(ClientEvent::Message(_)) => {}
                     Some(ClientEvent::Disconnected(r)) => return r,
                     None => return "connection closed".into(),

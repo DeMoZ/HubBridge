@@ -287,6 +287,14 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
 .tree { font-size: var(--fs-s); color: var(--text-2); border-left: 1px solid var(--edge-strong); margin-left: 4px; padding: 2px 0 2px var(--sp-3); display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
 .tree .l2 { padding-left: 12px; } .tree .l3 { padding-left: 24px; color: var(--text-3); }
 
+/* phone displays */
+.disp { background: var(--surface-2); border: var(--border-w) solid var(--edge); border-radius: var(--r-card); padding: 14px; display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.disp + .disp { margin-top: var(--sp-2); }
+.disp.active { border: 1.5px solid var(--accent); padding: 13.5px; }
+.disp .mstats { color: var(--text-2); font-size: var(--fs-s); overflow-wrap: anywhere; }
+select.field { height: 28px; background: var(--surface-3); border: var(--border-w) solid var(--edge-strong); border-radius: 10px; padding: 0 8px; font: inherit; font-size: var(--fs-s); }
+#displays > .sub, #displays > .err-line { margin-top: var(--sp-2); }
+
 /* serial bridge row of a device card */
 .serial { border-top: var(--border-w) solid var(--edge); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-s); }
 .serial .sform { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
@@ -421,6 +429,10 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
     <div class="col">
       <section class="panel" id="conn" tabindex="-1"></section>
       <section class="panel">
+        <div class="ph"><h2 tabindex="-1" data-t="displays"></h2><span class="count num" id="dispCount"></span></div>
+        <div id="displays"></div>
+      </section>
+      <section class="panel">
         <div class="ph"><h2 tabindex="-1" data-t="usb"></h2><span class="count num" id="devCount"></span></div>
         <div id="devices"></div>
       </section>
@@ -471,6 +483,18 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
     <div class="actions" id="updActions"></div>
   </div>
 </div>
+<div class="modal" id="permModal" role="dialog" aria-modal="true" aria-labelledby="permTitle">
+  <div class="sheet wide">
+    <div class="sh">
+      <div class="ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="16" height="10" rx="2"/><path d="M7 17h6M10 14v3"/></svg></div>
+      <h3 id="permTitle" tabindex="-1" data-t="permTitle"></h3>
+      <button class="x" id="permClose" type="button">✕</button>
+    </div>
+    <div class="sub" data-t="permText"></div>
+    <div class="sub warnline" data-t="permUpdate"></div>
+    <div class="actions"><button class="btn ghost" id="permCancel" type="button" data-t="close"></button><button class="btn primary" id="permOpen" type="button" data-first data-t="permOpen"></button></div>
+  </div>
+</div>
 <script>
 "use strict";
 const PLATFORM = "/*PLATFORM*/";
@@ -507,6 +531,19 @@ const I18N = {
     serialT: "Serial", baudT: "Baud", ptyT: "PTY", tcpT: "TCP port", rfcT: "RFC 2217", startT: "Start", stopT: "Stop", copyT: "Copy",
     sent: "sent", failedT: "failed", received: "received", droppedT: "dropped", lineErr: "line errors", stoppedWhy: "Stopped: {r}",
     pickFront: "Choose a PTY or a TCP port.", badBaud: "Baud rate: a number, e.g. 115200.", badPort: "TCP port: a number from 1 to 65535.",
+    displays: "Phone displays", dispOffline: "Connect to a phone to see its displays.",
+    dispOld: "The phone app is too old for displays and mirroring: update it.",
+    dispNone: "No display is attached to the phone.",
+    dexOn: "Samsung DeX is on: the monitor shows the DeX desktop. Turn DeX off on the phone to mirror.",
+    mirrorT: "Mirror", mirrorAria: "Mirror the screen to {name}", fpsT: "Frames per second", fpsN: "{n} fps",
+    needsMac: "Mirroring needs macOS for now", mirrorStarting: "Starting…", mirroringT: "mirroring",
+    mirrorStats: "{fps} fps · {kbps} kbit/s · delay {delay} ms · skipped {skipped} · keyframes {keys} · video RTT {rtt} ms · phone {pfps} fps, dropped {pdrop}",
+    phoneLocked: "The phone is locked: unlock it to see the picture.",
+    mirrorStopped: "Mirroring stopped: {r}", mirrorFailed: "Mirroring didn't start: {r}",
+    permTitle: "Allow Screen Recording",
+    permText: "HubBridge needs the Screen Recording permission to show your screen on the phone's monitor. Allow HubBridge in System Settings → Privacy & Security → Screen & System Audio Recording, then quit HubBridge and open it again.",
+    permUpdate: "An updated HubBridge has to be allowed again (the app has no developer signature). If an old HubBridge entry is already in the list, remove it with “−” first.",
+    permOpen: "Open System Settings",
     donate: "Support", donateTip: "Support development", donateHeading: "Thanks for using HubBridge!",
     donateOffline: "Couldn't load the latest list, showing a saved copy.",
     updatesTip: "Updates", updTitle: "Updates", updAvailableTitle: "Version {v} is available",
@@ -553,6 +590,19 @@ const I18N = {
     serialT: "Serial", baudT: "Скорость", ptyT: "PTY", tcpT: "TCP-порт", rfcT: "RFC 2217", startT: "Запустить", stopT: "Остановить", copyT: "Копировать",
     sent: "отправлено", failedT: "не ушло", received: "получено", droppedT: "потеряно", lineErr: "ошибок линии", stoppedWhy: "Остановлено: {r}",
     pickFront: "Выберите PTY или TCP-порт.", badBaud: "Скорость: число, например 115200.", badPort: "TCP-порт: число от 1 до 65535.",
+    displays: "Экраны телефона", dispOffline: "Подключитесь к телефону, чтобы увидеть его экраны.",
+    dispOld: "Приложение на телефоне слишком старое для экранов и трансляции: обновите его.",
+    dispNone: "К телефону не подключено внешних экранов.",
+    dexOn: "Включён Samsung DeX: на мониторе рабочий стол DeX. Чтобы транслировать экран, выключите DeX на телефоне.",
+    mirrorT: "Транслировать", mirrorAria: "Транслировать экран на {name}", fpsT: "Кадров в секунду", fpsN: "{n} кадр/с",
+    needsMac: "Трансляция экрана пока работает только на macOS", mirrorStarting: "Запуск…", mirroringT: "трансляция",
+    mirrorStats: "{fps} кадр/с · {kbps} кбит/с · задержка {delay} мс · пропущено {skipped} · ключевых {keys} · RTT видео {rtt} мс · телефон {pfps} кадр/с, не показано {pdrop}",
+    phoneLocked: "Телефон заблокирован: разблокируйте его, чтобы увидеть картинку.",
+    mirrorStopped: "Трансляция остановлена: {r}", mirrorFailed: "Трансляция не запустилась: {r}",
+    permTitle: "Разрешите запись экрана",
+    permText: "Чтобы показать ваш экран на мониторе телефона, HubBridge нужно разрешение на запись экрана. Разрешите HubBridge в «Системные настройки» → «Конфиденциальность и безопасность» → «Запись экрана и системного аудио», затем закройте HubBridge и откройте снова.",
+    permUpdate: "После обновления HubBridge разрешение нужно выдать заново (у программы нет подписи разработчика). Если старая запись HubBridge уже есть в списке, сначала удалите её кнопкой «−».",
+    permOpen: "Открыть системные настройки",
     donate: "Поддержать", donateTip: "Поддержать разработку", donateHeading: "Спасибо, что пользуетесь HubBridge!",
     donateOffline: "Свежий список способов загрузить не удалось: показана сохранённая копия.",
     updatesTip: "Обновления", updTitle: "Обновления", updAvailableTitle: "Доступна версия {v}",
@@ -758,6 +808,59 @@ function renderConn() {
     <div class="steps"><div class="step"><i>1</i><b>${t("s1")}</b>${t("s1t")}</div><div class="step"><i>2</i><b>${t("s2")}</b>${t("s2t")}</div><div class="step"><i>3</i><b>${t("s3")}</b>${t("s3t")}</div></div></div>`);
 }
 
+// The frame rate chosen per display, kept here so a re-render does not lose it.
+const MFPS = {};
+const hz = (mhz) => `${Number((mhz / 1000).toFixed(2))} Hz`;
+const whole = (v) => (v == null ? "—" : String(Math.round(v)));
+const statsText = (s) => t("mirrorStats", {
+  fps: whole(s.fps), kbps: whole(s.kbps), delay: whole(s.delay_ms), skipped: s.skipped, keys: s.keyframes,
+  rtt: whole(s.rtt_ms), pfps: whole(s.phone_fps), pdrop: s.phone_dropped,
+});
+
+// The adb transport of the connected phone, for updating its app.
+function appSerial() {
+  const tg = M.conn.target;
+  if (tg && tg.kind === "adb") return tg.value;
+  const ready = M.adb.phones.filter((p) => p.action_serial);
+  return ready.length === 1 ? ready[0].action_serial : null;
+}
+
+function renderDisplays() {
+  const d = M.displays, mv = M.mirror;
+  const connected = M.conn.state === "connected";
+  $("dispCount").textContent = connected && d.list.length ? String(d.list.length) : "";
+  // Why the last mirror ended stays, also when its display or the connection is gone.
+  const why = (mv.state === "stopped" || mv.state === "failed") && mv.reason
+    ? `<div class="err-line sel">${esc(t(mv.state === "stopped" ? "mirrorStopped" : "mirrorFailed", { r: mv.reason }))}</div>` : "";
+  if (!connected) return put("displays", `<div class="note">${t("dispOffline")}</div>${why}`);
+  if (!d.supported) {
+    const serial = appSerial();
+    const update = serial ? `<div class="row" style="margin-top:8px">${btn(t("updateApp"), data({ act: "install", serial }), "small primary", M.busy.includes("install:" + serial))}</div>` : "";
+    return put("displays", `<div class="note">${t("dispOld")}${update}</div>${why}`);
+  }
+  const busy = mv.state === "starting" || mv.state === "running";
+  const cards = d.list.map((x) => {
+    const mine = busy && mv.display === x.id;
+    let body = "";
+    if (mine && mv.state === "starting") {
+      body = `<div class="row">${btn(t("mirrorStarting"), data({ act: "mirrorstart", id: x.id }), "small primary", true)}</div>`;
+    } else if (mine) {
+      body = `<div class="row"><span class="chip ok">${t("mirroringT")}</span><span class="chip mono sel">${esc(mv.size ?? "")} · H.264 · ${esc(t("fpsN", { n: mv.fps }))}</span>${btn(t("stopT"), data({ act: "mirrorstop", id: x.id }), "small danger")}</div>
+        ${mv.stats ? `<div class="mstats mono sel">${esc(statsText(mv.stats))}</div>` : ""}
+        ${mv.phone_locked ? `<div class="sub warnline">${t("phoneLocked")}</div>` : ""}`;
+    } else if (!M.macos) {
+      body = `<div class="sub">${t("needsMac")}</div>`;
+    } else {
+      const fps = MFPS[x.id] ?? 30;
+      body = `<div class="row"><select class="field" id="fps-${x.id}" data-mfps="${x.id}" aria-label="${esc(t("fpsT"))}" ${busy ? "disabled" : ""}>${[30, 60].map((n) => `<option value="${n}" ${fps === n ? "selected" : ""}>${esc(t("fpsN", { n }))}</option>`).join("")}</select>
+        <button class="btn small primary" ${data({ act: "mirrorstart", id: x.id })} aria-label="${esc(t("mirrorAria", { name: x.name }))}" ${busy ? "disabled" : ""}>${esc(t("mirrorT"))}</button></div>`;
+    }
+    return `<div class="disp ${mine ? "active" : ""}"><div class="row"><span class="name" title="${esc(x.name)}">${esc(x.name)}</span><span class="chip num">${x.width}×${x.height} · ${hz(x.refresh_mhz)}</span></div>${body}</div>`;
+  }).join("");
+  const dex = d.desktop_mode ? `<div class="sub warnline">${t("dexOn")}</div>` : "";
+  put("displays", (cards || `<div class="note">${t("dispNone")}</div>`) + dex + why);
+}
+
 // Form values per device, kept here so a re-render does not lose what was typed.
 const SF = {};
 const sf = (id) => (SF[id] ??= { baud: "115200", pty: !!M.pty_supported, tcp: "", rfc: false });
@@ -889,16 +992,18 @@ function renderDonate() {
 
 function render() {
   if (!M) return;
-  renderStatus(); renderAgents(); renderPhones(); renderConn(); renderDevices(); renderUpdate(); renderDonate();
+  renderStatus(); renderAgents(); renderPhones(); renderConn(); renderDisplays(); renderDevices(); renderUpdate(); renderDonate();
 }
 
 // `update.offer` grows when a check wants the update sheet open; the failed-update toast shows once.
 let lastOffer = 0;
 let failedShown = false;
+// `mirror.permission` grows when a start found no Screen Recording permission.
+let lastPermission = 0;
 function offerUpdate() {
   if ($("updateModal").classList.contains("open")) return;
   // Not over another sheet (the PIN field, Support): the update sheet opens when that one is closed.
-  const other = ["pairModal", "donateModal"].map($).find((m) => m.classList.contains("open"));
+  const other = ["pairModal", "donateModal", "permModal"].map($).find((m) => m.classList.contains("open"));
   if (other) {
     other.addEventListener("sheetclose", () => setTimeout(offerUpdate, 0), { once: true });
     return;
@@ -912,6 +1017,7 @@ window.onState = (m) => {
   render();
   if (M.update.failed_launch && !failedShown) { failedShown = true; window.onToast("err", t("updateFailedToast")); }
   if (M.update.offer > lastOffer) { lastOffer = M.update.offer; offerUpdate(); }
+  if (M.mirror.permission > lastPermission) { lastPermission = M.mirror.permission; openSheet("permModal"); }
 };
 window.onToast = (kind, text) => {
   const el = document.createElement("div");
@@ -925,7 +1031,7 @@ window.onToast = (kind, text) => {
 };
 
 // Sheets: shared by the pairing sheet and the sheets of later changes.
-const focusables = (m) => [...m.querySelectorAll("button, input, [tabindex]")].filter((e) => !e.disabled && e.tabIndex >= 0 && !e.closest("[hidden]"));
+const focusables = (m) => [...m.querySelectorAll("button, input, select, [tabindex]")].filter((e) => !e.disabled && e.tabIndex >= 0 && !e.closest("[hidden]"));
 // While a sheet is open the rest of the page is inert: no focus, no clicks, hidden from assistive tech.
 const setInert = (on) => { for (const el of document.querySelectorAll(".app, .toasts")) el.inert = on; };
 // `fallback`: the id that gets the focus back when nothing was focused (the sheet opened by itself, or WebKit did
@@ -990,6 +1096,10 @@ $("pairClose").onclick = closePair;
 $("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") submitPair(); });
 $("pin").addEventListener("input", () => { $("pin").value = $("pin").value.replace(/\D/g, "").slice(0, 6); if ($("pin").value.length === 6) submitPair(); });
 
+$("permClose").onclick = () => closeSheet("permModal");
+$("permCancel").onclick = () => closeSheet("permModal");
+$("permOpen").onclick = () => send({ action: "open_screen_settings" });
+
 $("updBtn").onclick = () => openSheet("updateModal", "updBtn");
 $("updClose").onclick = () => closeSheet("updateModal");
 $("autoUpdate").onchange = (e) => send({ action: "set_auto_update", value: e.target.checked });
@@ -1027,6 +1137,8 @@ document.addEventListener("click", (e) => {
       break;
     }
     case "serialstop": send({ action: "serial_stop", id: Number(d.id) }); break;
+    case "mirrorstart": send({ action: "mirror_start", display_id: Number(d.id), fps: MFPS[Number(d.id)] ?? 30 }); break;
+    case "mirrorstop": send({ action: "mirror_stop" }); break;
     case "updcheck": send({ action: "update_check" }); break;
     case "updinstall": send({ action: "update_install" }); break;
     case "updskip": send({ action: "update_skip" }); closeSheet("updateModal"); break;
@@ -1036,6 +1148,10 @@ document.addEventListener("click", (e) => {
     case "copy": navigator.clipboard && navigator.clipboard.writeText(d.text).then(() => window.onToast("ok", d.text), () => {}); break;
     case "toggle": { const id = Number(d.id); expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderDevices(); break; }
   }
+});
+document.addEventListener("change", (e) => {
+  const el = e.target.closest && e.target.closest("[data-mfps]");
+  if (el) MFPS[Number(el.dataset.mfps)] = Number(el.value);
 });
 // Draw what was held back while a field had focus.
 document.addEventListener("focusout", () => setTimeout(() => { if (M) renderDevices(); }, 0));

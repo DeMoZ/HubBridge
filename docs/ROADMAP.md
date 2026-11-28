@@ -66,7 +66,7 @@ OpenSpec change `mac-screen-to-monitor`.
       permission; `hubbridge displays` and `hubbridge mirror`.
 - [x] Android: display list, `MediaCodec` low-latency decoding onto the monitor (watching it
       on hardware is part of the checks below).
-- [ ] Desktop window: "Phone displays" panel with Mirror/Stop.
+- [x] Desktop window: "Phone displays" panel with Mirror/Stop.
 - [ ] Checks on real hardware, measured delay (LIMITATIONS §6).
 
 ### Later

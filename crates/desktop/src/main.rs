@@ -105,6 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = window.drag_window();
             }
             Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
+            // Whatever ends the app: the phone removes a mirrored picture first.
+            Event::LoopDestroyed => app.stop_mirror_before_quit(),
             _ => {}
         }
     });
@@ -777,7 +779,7 @@ mod tests {
     #[test]
     fn the_update_sheet_does_not_open_over_another_sheet() {
         let body = js_function("offerUpdate");
-        for id in ["pairModal", "donateModal"] {
+        for id in ["pairModal", "donateModal", "permModal"] {
             assert!(body.contains(&format!("\"{id}\"")), "offerUpdate must wait for #{id}");
         }
     }
@@ -809,7 +811,7 @@ mod tests {
                 hosts.insert(&part[..end]);
             }
         }
-        for id in ["devices", "updStatus", "updActions", "donateMethods"] {
+        for id in ["devices", "displays", "updStatus", "updActions", "donateMethods"] {
             assert!(hosts.contains(id), "put host #{id} not found by the scan");
         }
         assert!(
