@@ -48,7 +48,25 @@ flowchart LR
 | `BridgeService` | Kotlin | Foreground service of type `connectedDevice` with an ongoing notification. Holds a partial wake lock and a `WIFI_MODE_FULL_LOW_LATENCY` lock, registers `_hubbridge._tcp` with `NsdManager`, listens for attach/detach/permission broadcasts, asks for USB permission when a host requests it. |
 | `UsbScanner` | Kotlin | Builds the device list from `UsbManager`: ids, class, configurations, interfaces, endpoints; with permission also the serial and the raw descriptors (`UsbDeviceConnection.getRawDescriptors()`). |
 | `NativeAgent` / `crates/android` | Kotlin ↔ Rust (JNI) | Thin JSON bridge; Rust calls back `onPermissionRequested` / `onStatusChanged`. |
-| `crates/agent` | Rust | TCP server (dual-stack `[::]` in LAN mode, `127.0.0.1` in ADB-only mode), pairing window (6-digit PIN, 120 s, 3 attempts), paired hosts store, sessions, device registry with diff → `DeviceAdded`/`DeviceRemoved` events, idle timeout. |
+| `crates/agent` | Rust | TCP server (dual-stack `[::]` in LAN mode, `127.0.0.1` in ADB-only mode), pairing window (6-digit PIN, 120 s, 3 attempts), paired hosts store, sessions, device registry with diff → `DeviceAdded`/`DeviceRemoved` events, idle timeout; phone displays and mirroring (below). |
+
+**Displays and mirroring in `crates/agent`** (`video.rs`; messages in [PROTOCOL.md](PROTOCOL.md)):
+
+- `Agent::set_displays` takes the platform's presentation displays; a changed list goes as
+  `DisplaysChanged` only to sessions that sent `GetDisplays`.
+- The platform's video output is the `VideoSink` trait (`start`, `frame`, `stats`, `stop`; only
+  called from threads that may block); `fake::FakeVideoSink` checks the H.264 stream for the
+  simulator and the tests. The platform reports back with `mirror_failed`, `request_keyframe` and
+  `set_phone_locked`.
+- Stream registry: one stream per display, bound to the control session and host id that started
+  it. A media session is a second resumed session whose first request is `MirrorAttach`
+  (`media: true` in the status JSON, so the phone does not count it as a computer). Its frames go
+  to a sink thread through a queue of three; it sends acknowledgements, keyframe requests and a
+  status every second.
+- A stream ends exactly once (stop request, display removed, video session lost, not attached
+  within 5 s, decoder stalled for 2 s or failed, the platform's report, the control session
+  ending, agent shutdown): the sink is stopped, the owner gets `MirrorStopped` when the phone
+  side ended it, and the media session closes.
 
 Why the core is in Rust and not Kotlin: one implementation of the protocol and crypto
 for both ends; and from step 2 the hot path (USB transfers) runs in Rust directly on the
