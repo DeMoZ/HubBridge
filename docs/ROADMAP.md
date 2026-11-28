@@ -64,7 +64,8 @@ OpenSpec change `mac-screen-to-monitor`.
       decoder); tested without a phone.
 - [x] macOS: ScreenCaptureKit capture, VideoToolbox low-latency H.264, Screen Recording
       permission; `hubbridge displays` and `hubbridge mirror`.
-- [ ] Android: display list, `MediaCodec` low-latency decoding onto the monitor.
+- [x] Android: display list, `MediaCodec` low-latency decoding onto the monitor (watching it
+      on hardware is part of the checks below).
 - [ ] Desktop window: "Phone displays" panel with Mirror/Stop.
 - [ ] Checks on real hardware, measured delay (LIMITATIONS §6).
 
