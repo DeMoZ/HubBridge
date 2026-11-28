@@ -55,6 +55,9 @@ object NativeAgent {
     /** JSON array from [UsbScanner.scanJson]. */
     external fun setDevices(json: String)
 
+    /** JSON from [DisplayWatcher]. */
+    external fun setDisplays(json: String)
+
     /** JSON of `hubbridge_agent::AgentStatus`, or "" if not running. */
     external fun status(): String
 

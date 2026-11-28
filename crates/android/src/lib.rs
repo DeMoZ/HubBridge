@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use hubbridge_agent::{Agent, AgentCallbacks, AgentConfig};
-use hubbridge_proto::{ConfigInfo, UsbDeviceInfo};
+use hubbridge_proto::{ConfigInfo, DisplayInfo, DisplayList, DisplayMode, UsbDeviceInfo};
 use jni::objects::{GlobalRef, JObject, JString};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jstring};
 use jni::{JNIEnv, JavaVM};
@@ -86,6 +86,62 @@ impl From<AndroidDevice> for UsbDeviceInfo {
 pub fn parse_devices(json: &str) -> Result<Vec<UsbDeviceInfo>> {
     let list: Vec<AndroidDevice> = serde_json::from_str(json).context("device list JSON")?;
     Ok(list.into_iter().map(Into::into).collect())
+}
+
+/// The display list as `DisplayWatcher.kt` describes it.
+#[derive(Deserialize)]
+struct AndroidDisplays {
+    desktop_mode: bool,
+    displays: Vec<AndroidDisplay>,
+}
+
+#[derive(Deserialize)]
+struct AndroidDisplay {
+    id: u32,
+    name: String,
+    width: u32,
+    height: u32,
+    refresh_mhz: u32,
+    modes: Vec<AndroidDisplayMode>,
+    presentation: bool,
+    secure: bool,
+}
+
+#[derive(Deserialize)]
+struct AndroidDisplayMode {
+    width: u32,
+    height: u32,
+    refresh_mhz: u32,
+}
+
+/// Parse the JSON `DisplayWatcher.kt` produces.
+pub fn parse_displays(json: &str) -> Result<DisplayList> {
+    let list: AndroidDisplays = serde_json::from_str(json).context("display list JSON")?;
+    Ok(DisplayList {
+        desktop_mode: list.desktop_mode,
+        displays: list
+            .displays
+            .into_iter()
+            .map(|d| DisplayInfo {
+                id: d.id,
+                name: d.name.trim().to_string(),
+                width: d.width,
+                height: d.height,
+                refresh_mhz: d.refresh_mhz,
+                modes: d
+                    .modes
+                    .into_iter()
+                    .map(|m| DisplayMode {
+                        width: m.width,
+                        height: m.height,
+                        refresh_mhz: m.refresh_mhz,
+                    })
+                    .collect(),
+                presentation: d.presentation,
+                secure: d.secure,
+            })
+            .collect(),
+    })
 }
 
 /// Calls back into the Kotlin `NativeAgent.Callbacks` object from Rust threads.
@@ -340,6 +396,21 @@ pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_setDevices<'l>(
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_setDisplays<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    json: JString<'l>,
+) {
+    let json = jstr(&mut env, &json);
+    match parse_displays(&json) {
+        Ok(list) => {
+            with_agent(|a| a.set_displays(list));
+        }
+        Err(e) => log::error!("setDisplays: {e:#}"),
+    }
+}
+
 /// Agent status as JSON (see `hubbridge_agent::AgentStatus`), or "" if not running.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_status<'l>(
@@ -392,5 +463,61 @@ mod tests {
         assert_eq!(intf.name.as_deref(), Some("UART"));
         assert!(list[1].configurations.is_empty());
         assert_eq!(uart.manufacturer.as_deref(), Some("Silicon Labs"));
+    }
+
+    /// Values of the SM-G970F with its monitor through a hub, DeX off (2026-11-28).
+    #[test]
+    fn parses_display_json() {
+        let mode = |w, h, r| format!(r#"{{"width":{w},"height":{h},"refresh_mhz":{r}}}"#);
+        let modes = [
+            mode(2560, 1600, 60011),
+            mode(1920, 1200, 59885),
+            mode(1280, 720, 60000),
+            mode(720, 480, 59940),
+            mode(640, 480, 59940),
+        ]
+        .join(",");
+        let json = format!(
+            r#"{{"desktop_mode":false,"displays":[{{"id":10,"name":"HDMI Screen","width":2560,"height":1600,
+            "refresh_mhz":60011,"modes":[{modes}],"presentation":true,"secure":true}}]}}"#
+        );
+        let list = parse_displays(&json).unwrap();
+        assert!(!list.desktop_mode);
+        let [d] = list.displays.as_slice() else {
+            panic!("{list:?}")
+        };
+        assert_eq!((d.id, d.name.as_str()), (10, "HDMI Screen"));
+        assert_eq!((d.width, d.height, d.refresh_mhz), (2560, 1600, 60_011));
+        assert_eq!(d.modes.len(), 5);
+        assert_eq!(
+            (d.modes[2].width, d.modes[2].height, d.modes[2].refresh_mhz),
+            (1280, 720, 60_000)
+        );
+        assert!(d.presentation && d.secure);
+        assert!(
+            parse_displays(r#"{"desktop_mode":true,"displays":[]}"#)
+                .unwrap()
+                .desktop_mode
+        );
+        assert!(parse_displays(r#"{"displays":[]}"#).is_err());
+        // The Kotlin side writes exactly these names.
+        let kotlin = include_str!("../../../android/app/src/main/kotlin/com/demoz/hubbridge/DisplayWatcher.kt");
+        for field in [
+            "desktop_mode",
+            "displays",
+            "id",
+            "name",
+            "width",
+            "height",
+            "refresh_mhz",
+            "modes",
+            "presentation",
+            "secure",
+        ] {
+            assert!(
+                kotlin.contains(&format!(".put(\"{field}\"")),
+                "DisplayWatcher.kt: {field}"
+            );
+        }
     }
 }

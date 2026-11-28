@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.net.wifi.WifiManager
@@ -37,6 +38,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     private val io = Executors.newSingleThreadExecutor()
     private lateinit var scanner: UsbScanner
     private lateinit var nsd: NsdAdvertiser
+    private lateinit var displayWatcher: DisplayWatcher
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var running = false
@@ -58,6 +60,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         instance = this
         scanner = UsbScanner(this)
         nsd = NsdAdvertiser(this)
+        displayWatcher = DisplayWatcher(this) { json -> if (running) NativeAgent.setDisplays(json) }
         createChannel()
         val filter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -139,6 +142,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         lastError = ""
         acquireLocks()
         pushDevices()
+        displayWatcher.start()
         if (lan) {
             val id = try { JSONObject(NativeAgent.status()).getString("agent_id") } catch (_: Exception) { "" }
             nsd.register(p, id, name)
@@ -146,6 +150,12 @@ class BridgeService : Service(), NativeAgent.Callbacks {
             nsd.unregister()
         }
         notifyChanged()
+    }
+
+    /** Samsung DeX can change the configuration without a display event. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        displayWatcher.push()
     }
 
     private fun acquireLocks() {
@@ -264,6 +274,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         running = false
         spike?.stop()
         spike = null
+        displayWatcher.stop()
         unregisterReceiver(usbReceiver)
         for (c in connections.values) c.close()
         connections.clear()

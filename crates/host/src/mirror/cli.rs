@@ -46,7 +46,8 @@ fn display_line(d: &DisplayInfo, desktop_mode: bool) -> String {
     )
 }
 
-fn print_displays(list: &DisplayList, phone: &str, json: bool, out: &mut dyn Write) -> Result<()> {
+/// The listing of `hubbridge displays` (also used by `hubbridge watch`).
+pub fn print_displays(list: &DisplayList, phone: &str, json: bool, out: &mut dyn Write) -> Result<()> {
     if json {
         writeln!(out, "{}", serde_json::to_string_pretty(list)?)?;
         return Ok(());

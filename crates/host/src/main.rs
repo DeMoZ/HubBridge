@@ -857,6 +857,14 @@ async fn watch(target: Option<String>, store: &mut Store) -> Result<()> {
         for d in client.list_devices().await.unwrap_or_default() {
             println!("  present  {}", d.label());
         }
+        // Asking also subscribes to display changes; an older app must not be asked.
+        let new_app = client
+            .agent_info()
+            .await
+            .is_ok_and(|i| mirror::session::require_new_app(&i.app_version).is_ok());
+        if new_app && let Ok(list) = client.displays().await {
+            mirror::cli::print_displays(&list, &client.agent_name, false, &mut std::io::stdout())?;
+        }
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         let mut seq = 0u32;
         let reason = loop {
@@ -873,6 +881,10 @@ async fn watch(target: Option<String>, store: &mut Store) -> Result<()> {
                     Some(ClientEvent::Message(Message::DeviceAdded(d))) => println!("  added    {}", d.label()),
                     Some(ClientEvent::Message(Message::DeviceRemoved { id })) => println!("  removed  [{id}]"),
                     Some(ClientEvent::Message(Message::DeviceList { devices })) => println!("  resync: {} devices", devices.len()),
+                    Some(ClientEvent::Message(Message::DisplaysChanged(list))) => {
+                        println!("  displays changed:");
+                        mirror::cli::print_displays(&list, &client.agent_name, false, &mut std::io::stdout())?;
+                    }
                     Some(ClientEvent::Message(other)) => println!("  event    {other:?}"),
                     Some(ClientEvent::Disconnected(r)) => break r,
                     None => break "event stream ended".into(),
