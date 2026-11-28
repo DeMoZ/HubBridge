@@ -160,8 +160,9 @@ sent another request is answered `Unsupported`.
   takes nothing for 2 s ends the mirror (`DecoderStalled`).
 - **Keyframes:** the stream starts with a config frame and a keyframe; the host sends a new
   keyframe when asked and at least every 10 s, at most two forced ones per second.
-- **Still screen:** no frames are sent. The host sends `Ping` after 2 s without a frame, so
-  the agent's 20 s idle timeout never ends a quiet stream; the `Pong` gives the media RTT.
+- **Still screen:** no frames are sent. The host sends `Ping` every 2 s, with or without
+  frames, so the agent's 20 s idle timeout never ends a quiet stream; the `Pong` gives the
+  media RTT.
 - A stream that is not attached within 5 s ends (`NotAttached`). When the control session
   ends, its streams end without an event.
 

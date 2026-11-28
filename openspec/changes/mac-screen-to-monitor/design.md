@@ -227,10 +227,18 @@ one round trip, also when Wi-Fi stalls or the decoder is slow. The pacing logic 
 On the phone, the media session hands frames to a dedicated sink thread through a channel of 3 (window + 1). A
 sink call that does not return within 2 s ends the mirror (`DecoderStalled`). The phone never drops input frames;
 when the decoder reports an error, it asks for a keyframe (`VideoNeedKeyframe`) and, if the next keyframe also
-fails, ends the mirror (`DecoderFailed`).
+fails, ends the mirror (`DecoderFailed`). The same rule holds for errors that show up on the decoder's output
+side: an error after the keyframe that should repair one, before a picture of it came out, ends the mirror.
+The one exception to "never drops" is the replacement of the window and decoder (D11).
 
-A still screen sends no frames; the host sends `Ping` on the media session after 2 s without a frame (the agent's
-20 s idle timeout stays, the pong gives the media round-trip time). The agent sends `VideoStatus` every second
+On the host, a picture that comes out of the encoder with nothing is offered again, a dropped keyframe again as a
+keyframe. That is bounded (`mirror::health`): after 25 errors in a row (250 drops without an error), or at once
+for an invalid session, the encoder is made anew; when the new one fails the same way, the mirror ends with
+"the screen capture stopped: the video encoder keeps failing".
+
+A still screen sends no frames; the host sends `Ping` on the media session every 2 s, whether frames flow or not
+(a quiet stream never meets the agent's 20 s idle timeout, and the pong gives the media round-trip time of the
+readout also while streaming). The agent sends `VideoStatus` every second
 (decoded and dropped counts, average decode-input-to-output time, phone locked) whether frames flow or not.
 
 ### D8. Messages (appended after `DeviceClosed`)
@@ -255,9 +263,11 @@ there; the message says why and what to do). New error codes are sent only as an
 new hosts send. Structs are final once released (postcard cannot grow them), which is why `desktop_mode`,
 `phone_locked` and `bad` are in now.
 
-Rejected start reasons: unknown display → `UnknownDisplay`; display already mirrored → `Busy`; codec, size or
-fps outside what the decoder supports → `Unsupported`; the surface could not be shown (route conditions, no
-decoder) → `DisplayFailed`.
+Rejected start reasons: unknown display → `UnknownDisplay`; display already mirrored → `Busy`; no video output,
+another codec, a zero size or fps outside 1–60 (checked by the agent) → `Unsupported`; the phone could not show
+the picture (route conditions, no surface, no decoder for the size, the decoder did not start) →
+`DisplayFailed`, with the reason in words. A start that takes longer than 5 s is answered `DisplayFailed`; the
+display stays `Busy` until the platform's start call returns and its picture is removed.
 
 ### D9. Compatibility gate
 
@@ -299,7 +309,15 @@ decoder) → `DisplayFailed`.
 - `MirrorPresentation.kt` (route S1): created on the main thread from `BridgeService`, black `FrameLayout`,
   centered `SurfaceView`, `FLAG_KEEP_SCREEN_ON`; `onMirrorStart` (JNI, blocking, from an agent thread) posts to the
   main thread and waits up to 3 s for the surface and the configured decoder; returns 0 or an error code with text.
-  `onDismiss` / surface destroyed → `mirrorFailed(SurfaceLost)`.
+  `onDismiss` / surface destroyed → the window is replaced or the mirror ends (next item).
+- A lost window of a running mirror: Android 12's `Presentation` cancels itself when its display's size
+  changes (`Presentation.handleDisplayChanged`), so a mode change takes the window away while the monitor stays.
+  The decoder is released before the callback returns. Display gone → `DisplayRemoved` at once. Otherwise, after
+  300 ms: display gone → `DisplayRemoved`; DeX on → `SurfaceLost` (turn DeX off); else a new window and decoder,
+  then a keyframe request; at most 5 attempts in 30 s, then `SurfaceLost`. Meanwhile the sink takes and throws
+  away frames (also delta frames until the new decoder has had a keyframe), so the agent sees no stall and no
+  decoder error, and the host's window stays free. During a start, a lost window still refuses the start. The
+  rules are in `MirrorRules.kt` (JVM tests: `./gradlew testDebugUnitTest`).
 - `MirrorDecoder.kt`: the MediaCodec of D4; `onVideoFrame(streamId, bytes, ptsUs, flags): Int` (0 queued,
   1 no input buffer in time, 2 codec error → keyframe request); output thread; counters for `VideoStatus`.
 - Route S2 (spike result): the picture is visible only with Samsung DeX off. While the DeX flag is on, the sink
@@ -415,9 +433,10 @@ all of this; Developer ID signing (roadmap) is the real fix.
 
 - Whether a locked phone whose screen is on shows the picture or the lock screen on the monitor (not tested by the
   spike).
-- A monitor mode change while mirroring: Android 12's `Presentation` source cancels the window when the display's
-  size changes, which would end the mirror (`SurfaceLost`) instead of re-laying it out, against the spec scenario
-  "Monitor mode changes while mirroring". The layout itself follows the display's size. Not tested on the phone.
+- A monitor mode change while mirroring: Android 12's `Presentation` cancels the window when the display's size
+  changes; the app opens a new one (D11), so the mirror goes on after a short black moment. Not tested on the
+  phone, and neither is whether a window that is lost while the phone is locked or its screen off can be opened
+  again before the attempts run out.
 - Which profile VideoToolbox accepts in low-latency mode on this Mac (D4 handles both): answered 2026-11-28,
   `ConstrainedHigh_AutoLevel` is accepted (encoder test, 1108×720, 60 pictures, none dropped).
 
