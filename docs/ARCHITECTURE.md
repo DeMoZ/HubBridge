@@ -90,7 +90,27 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - `data-theme` on `<html>` forces a theme: `HUBBRIDGE_DEV_SCRIPT="document.documentElement.dataset.theme='light'"`
   (or `'dark'`) is how screenshots of both themes are made.
 - Sheets use `openSheet(id)` / `closeSheet(id)`: Escape and a backdrop click close them, the rest of
-  the page is `inert` while one is open, and focus returns to the opener.
+  the page is `inert` while one is open, and focus returns to the opener. Content re-rendered with
+  `put()` inside a panel or a sheet never drops the focus to the body: it stays on the same control
+  or moves to the heading (a test checks every `put()` host).
+- One-shot events go through the same model push as everything else. `update.offer` is a counter:
+  the page opens the update sheet when it sees the value grow. `update.failed_launch` (the process
+  got `--update-failed`) makes the page show its toast once.
+- Modules besides the controller: `net.rs` (the system `curl`, so the app carries no TLS library;
+  opens only `https://` links), `update.rs` (latest GitHub release, SHA-256 check against the
+  published digest, unpacking, the bundle id check, the script that replaces the app after it quits)
+  and `donations.rs` (the Support sheet's list). Their files live in the HubBridge config folder,
+  or in `HUBBRIDGE_HOME`.
+- Updating works only in a release build that runs from `HubBridge.app` (or the `.exe` folder on
+  Windows). It is refused while the phone app is being installed or a pairing runs; running serial
+  bridges are stopped and the phone is disconnected before the app quits. For checks,
+  `HUBBRIDGE_UPDATES_URL` (`https://` only) replaces the address of the latest release.
+- The release notes are shown in the update window up to the first "Install" / "Установка" heading,
+  so those sections come last in `docs/releases/v<version>.md`.
+- `crates/desktop/assets/donations.json` (the built-in copy) and `hubbridge.json` in
+  [DeMoZ/donations](https://github.com/DeMoZ/donations) must be identical. The window downloads the
+  latter every time the Support sheet opens (raw.githubusercontent.com, then jsDelivr) and keeps the
+  last usable copy as `donations.json` in the config folder.
 - The app icon is drawn by `scripts/make-icon.swift`; `scripts/make-icon.sh` writes
   `crates/desktop/assets/icon.png` and `AppIcon.icns` (macOS only, outputs are committed). The Android
   launcher icon is an adaptive icon with the same mark.
@@ -170,7 +190,9 @@ HubBridge/
 │   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
-│       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh)
+│       ├── src/               app.rs (controller), net.rs, update.rs, donations.rs, ui/index.html
+│       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh);
+│                              donations.json: built-in copy of the Support list
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)
 │   └── app/src/main/kotlin/com/demoz/hubbridge/
 │       ├── MainActivity.kt    UI

@@ -1332,6 +1332,7 @@ dependencies = [
  "hubbridge-proto",
  "serde",
  "serde_json",
+ "sha2",
  "tao",
  "tokio",
  "tracing",

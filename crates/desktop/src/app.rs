@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -17,12 +18,22 @@ use hubbridge_host::{Client, ClientEvent, Store, adb};
 use hubbridge_link::LinkError;
 use hubbridge_proto::{AgentInfo, DEFAULT_PORT, HelloError, Message, UsbDeviceInfo};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::task::JoinHandle;
+
+use crate::{donations, net, update};
 
 /// Sends a script to the page (the window lives on the main thread).
 pub type Push = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Quits the app: the event loop ends and the process exits.
+pub type Exit = Arc<dyn Fn() + Send + Sync>;
+
 const RTT_HISTORY: usize = 90;
+
+/// Automatic update checks: at most one in this many seconds, looked at this often while running.
+const CHECK_EVERY_SECS: u64 = 86_400;
+const CHECK_TICK: Duration = Duration::from_secs(3600);
 
 // ---------------------------------------------------------------------------------------
 // What the page shows
@@ -43,6 +54,58 @@ pub struct Model {
     pub pty_supported: bool,
     /// Running actions, e.g. "install:R28M303RHET", "pair", "wifi:R28M303RHET".
     pub busy: BTreeSet<String>,
+    pub update: UpdateView,
+    pub donate: DonateView,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct UpdateView {
+    /// The packaged app; a development build cannot update itself.
+    pub can_update: bool,
+    /// The folder of the app can be written to.
+    pub writable: bool,
+    pub auto_update: bool,
+    pub checking: bool,
+    pub downloading: bool,
+    /// A newer release.
+    pub available: Option<AvailableView>,
+    /// The newer release has no file for this system.
+    pub no_file: bool,
+    pub status: Option<UpdateStatus>,
+    /// The page opens the update sheet when this grows.
+    pub offer: u64,
+    /// Started again after an update that could not replace the app.
+    pub failed_launch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AvailableView {
+    pub version: String,
+    pub notes: String,
+    pub page: String,
+}
+
+/// A line of the update sheet: the page translates `key` and fills in `args`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UpdateStatus {
+    /// ok | err | new
+    pub kind: &'static str,
+    pub key: &'static str,
+    pub args: serde_json::Value,
+}
+
+impl UpdateStatus {
+    fn new(kind: &'static str, key: &'static str, args: serde_json::Value) -> Option<UpdateStatus> {
+        Some(UpdateStatus { kind, key, args })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DonateView {
+    pub loading: bool,
+    /// The latest list could not be loaded: a saved copy is shown.
+    pub offline: bool,
+    pub info: Option<donations::Info>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -210,6 +273,21 @@ pub enum Request {
     SerialStop {
         id: u32,
     },
+    UpdateCheck,
+    UpdateInstall,
+    UpdateSkip,
+    /// The release page of the new version, or the list of all releases.
+    UpdatePage,
+    SetAutoUpdate {
+        value: bool,
+    },
+    /// The Support sheet opened; `lang` is the language of the page.
+    DonateOpen {
+        lang: String,
+    },
+    OpenUrl {
+        url: String,
+    },
     Drag,
 }
 
@@ -217,13 +295,95 @@ pub enum Request {
 // Settings of the window (not secrets)
 // ---------------------------------------------------------------------------------------
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Settings {
     /// ro.serialno → "ip:5555".
     #[serde(default)]
     adb_wifi: BTreeMap<String, String>,
     #[serde(default)]
     last_target: Option<Target>,
+    #[serde(default = "yes")]
+    auto_update: bool,
+    /// Last successful update check (Unix seconds).
+    #[serde(default)]
+    last_update_check: u64,
+    /// Version the automatic check does not offer again.
+    #[serde(default)]
+    skipped_version: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            adb_wifi: BTreeMap::new(),
+            last_target: None,
+            auto_update: true,
+            last_update_check: 0,
+            skipped_version: String::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Rules of updating
+// ---------------------------------------------------------------------------------------
+
+fn should_auto_check(s: &Settings, can_update: bool, now: u64) -> bool {
+    s.auto_update && can_update && now.saturating_sub(s.last_update_check) >= CHECK_EVERY_SECS
+}
+
+/// Whether the update sheet opens by itself for the version `found`.
+fn should_offer(manual: bool, skipped: &str, found: &str) -> bool {
+    manual || skipped != found
+}
+
+/// An update waits while the app talks to the phone: an APK install or a pairing.
+fn update_blocked(busy: &BTreeSet<String>) -> bool {
+    busy.iter().any(|k| k == "pair" || k.starts_with("install:"))
+}
+
+/// Shows the answer of an update check; returns the newer release, if there is one.
+fn apply_check(
+    view: &mut UpdateView,
+    result: Result<update::Release, String>,
+    current: update::Version,
+    manual: bool,
+    skipped: &str,
+) -> Option<update::Release> {
+    view.checking = false;
+    let release = match result {
+        Ok(r) => r,
+        Err(e) => {
+            view.status = UpdateStatus::new("err", "updCheckFailed", json!({ "err": e }));
+            return None;
+        }
+    };
+    if release.version <= current {
+        view.available = None;
+        view.no_file = false;
+        view.status = UpdateStatus::new("ok", "updLatest", json!({ "v": update::format_version(current) }));
+        return None;
+    }
+    let version = update::format_version(release.version);
+    view.available = Some(AvailableView {
+        version: version.clone(),
+        notes: release.notes.clone(),
+        page: release.page_url.clone(),
+    });
+    view.no_file = release.file.is_none();
+    if view.no_file {
+        view.status = UpdateStatus::new("new", "updNoFile", json!({ "v": version }));
+    } else {
+        view.status = UpdateStatus::new("new", "updNew", json!({ "v": version }));
+        if should_offer(manual, skipped, &version) {
+            view.offer += 1;
+        }
+    }
+    Some(release)
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -283,6 +443,13 @@ pub struct App {
     bridges: Mutex<HashMap<u32, Arc<BridgeHandle>>>,
     /// Devices whose bridge is being started (the id is taken before the first await).
     starting: Mutex<BTreeSet<u32>>,
+    exit: Exit,
+    /// The newer release the last check found.
+    release: Mutex<Option<update::Release>>,
+    /// The donations file shown now, parsed again for every opening.
+    donations: Mutex<Vec<u8>>,
+    donate_lang: Mutex<String>,
+    first_ready: AtomicBool,
 }
 
 /// A device id reserved for a starting bridge; released when dropped.
@@ -315,6 +482,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_secs() -> u64 {
+    now_ms() / 1000
+}
+
 /// Errors that a retry will not fix: the user has to pair.
 fn needs_pairing(e: &anyhow::Error) -> bool {
     matches!(
@@ -333,18 +504,28 @@ fn short(e: &anyhow::Error) -> String {
 }
 
 impl App {
-    pub fn new(rt: tokio::runtime::Handle, push: Push) -> Result<Arc<App>> {
+    pub fn new(rt: tokio::runtime::Handle, push: Push, exit: Exit) -> Result<Arc<App>> {
         let store = Store::load_default()?;
+        let settings = Settings::load();
+        let target = update::install_target();
+        let update_view = UpdateView {
+            can_update: target.is_some(),
+            writable: target.as_deref().is_some_and(update::can_write),
+            auto_update: settings.auto_update,
+            failed_launch: std::env::args().any(|a| a == "--update-failed"),
+            ..Default::default()
+        };
         let app = Arc::new(App {
             rt,
             push,
             model: Mutex::new(Model {
                 version: env!("CARGO_PKG_VERSION"),
                 pty_supported: cfg!(target_os = "macos"),
+                update: update_view,
                 ..Default::default()
             }),
             store: tokio::sync::Mutex::new(store),
-            settings: Mutex::new(Settings::load()),
+            settings: Mutex::new(settings),
             discovered: Mutex::new(Vec::new()),
             facts: Mutex::new(HashMap::new()),
             refused: Mutex::new(BTreeSet::new()),
@@ -355,6 +536,11 @@ impl App {
             browser: Mutex::new(None),
             bridges: Mutex::new(HashMap::new()),
             starting: Mutex::new(BTreeSet::new()),
+            exit,
+            release: Mutex::new(None),
+            donations: Mutex::new(donations::cached()),
+            donate_lang: Mutex::new(String::new()),
+            first_ready: AtomicBool::new(true),
         });
         lock(&app.model).conn.state = "idle".into();
         app.start_background();
@@ -410,6 +596,16 @@ impl App {
 
         let me = Arc::clone(self);
         self.rt.spawn(async move { me.adb_watcher().await });
+
+        // The once-a-day rule also holds while the app keeps running.
+        let me = Arc::clone(self);
+        self.rt.spawn(async move {
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + CHECK_TICK, CHECK_TICK);
+            loop {
+                tick.tick().await;
+                me.auto_check();
+            }
+        });
 
         // Auto-connect a moment after start (lets mDNS find the phone first).
         let me = Arc::clone(self);
@@ -583,6 +779,9 @@ impl App {
         match req {
             Request::Ready => {
                 self.push_model();
+                if self.first_ready.swap(false, Ordering::Relaxed) {
+                    self.auto_check();
+                }
             }
             Request::Connect { target } => {
                 *lock(&self.manual_idle) = false;
@@ -687,7 +886,204 @@ impl App {
                 let me = Arc::clone(self);
                 self.rt.spawn(async move { me.stop_bridge(id, None).await });
             }
+            Request::UpdateCheck => self.check_updates(true),
+            Request::UpdateInstall => self.update_install(),
+            Request::UpdateSkip => {
+                let version = lock(&self.model).update.available.as_ref().map(|a| a.version.clone());
+                if let Some(v) = version {
+                    let mut s = lock(&self.settings);
+                    s.skipped_version = v;
+                    s.save();
+                }
+            }
+            Request::UpdatePage => {
+                let page = lock(&self.model).update.available.as_ref().map(|a| a.page.clone());
+                let url = page.filter(|u| !u.is_empty()).unwrap_or_else(update::releases_page);
+                self.open_url(&url);
+            }
+            Request::SetAutoUpdate { value } => {
+                {
+                    let mut s = lock(&self.settings);
+                    s.auto_update = value;
+                    s.save();
+                }
+                self.update(|m| m.update.auto_update = value);
+            }
+            Request::DonateOpen { lang } => self.donate_open(lang),
+            Request::OpenUrl { url } => self.open_url(&url),
             Request::Drag => {}
+        }
+    }
+
+    // --- updates -------------------------------------------------------------------------
+
+    fn auto_check(self: &Arc<Self>) {
+        let can_update = lock(&self.model).update.can_update;
+        let due = should_auto_check(&lock(&self.settings), can_update, now_secs());
+        if due {
+            self.check_updates(false);
+        }
+    }
+
+    fn check_updates(self: &Arc<Self>, manual: bool) {
+        {
+            let mut m = lock(&self.model);
+            if m.update.checking || m.update.downloading {
+                return;
+            }
+            m.update.checking = true;
+            m.update.status = None;
+        }
+        self.push_model();
+        let me = Arc::clone(self);
+        self.rt.spawn(async move {
+            let (result, writable) = tokio::task::spawn_blocking(|| {
+                let writable = update::install_target().as_deref().is_some_and(update::can_write);
+                (update::latest(), writable)
+            })
+            .await
+            .unwrap_or_else(|e| (Err(e.to_string()), false));
+            // Saved on success only: an offline start tries again at the next tick.
+            let skipped = {
+                let mut s = lock(&me.settings);
+                if result.is_ok() {
+                    s.last_update_check = now_secs();
+                    s.save();
+                }
+                s.skipped_version.clone()
+            };
+            let succeeded = result.is_ok();
+            me.update(|m| {
+                m.update.writable = writable;
+                let found = apply_check(&mut m.update, result, update::current(), manual, &skipped);
+                if succeeded {
+                    *lock(&me.release) = found;
+                }
+            });
+        });
+    }
+
+    fn update_install(self: &Arc<Self>) {
+        let Some(release) = lock(&self.release).clone().filter(|r| r.file.is_some()) else {
+            return;
+        };
+        let blocked = {
+            let mut m = lock(&self.model);
+            if m.update.checking || m.update.downloading {
+                return;
+            }
+            let blocked = update_blocked(&m.busy);
+            if blocked {
+                m.update.status = UpdateStatus::new("err", "updWaitBusy", json!({}));
+            } else {
+                m.update.downloading = true;
+                let v = update::format_version(release.version);
+                m.update.status = UpdateStatus::new("new", "updDownloading", json!({ "v": v }));
+            }
+            blocked
+        };
+        self.push_model();
+        if blocked {
+            return;
+        }
+        let me = Arc::clone(self);
+        self.rt.spawn(async move {
+            let source = tokio::task::spawn_blocking(move || update::download(&release))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            let source = match source {
+                Ok(s) => s,
+                Err(e) => return me.update_stopped("updFailed", json!({ "err": e })),
+            };
+            // A pairing or an APK install may have started during the download.
+            if update_blocked(&lock(&me.model).busy) {
+                return me.update_stopped("updWaitBusy", json!({}));
+            }
+            let Some(target) = update::install_target() else {
+                return me.update_stopped(
+                    "updFailed",
+                    json!({ "err": "could not find where the app is installed" }),
+                );
+            };
+            me.stop_all_bridges("the app is updating").await;
+            me.disconnect_and_wait().await;
+            match update::start_install(&source, &target) {
+                Ok(()) => {
+                    me.update(|m| m.update.status = UpdateStatus::new("ok", "updRestarting", json!({})));
+                    // The replace script waits for this process to end.
+                    (me.exit)();
+                }
+                Err(e) => me.update_stopped(
+                    "updFailed",
+                    json!({ "err": format!("could not start the installer: {e}") }),
+                ),
+            }
+        });
+    }
+
+    /// The install did not happen and the app keeps running.
+    fn update_stopped(&self, key: &'static str, args: serde_json::Value) {
+        self.update(|m| {
+            m.update.downloading = false;
+            m.update.status = UpdateStatus::new("err", key, args);
+        });
+    }
+
+    /// Disconnect and let the session say goodbye before the app quits.
+    async fn disconnect_and_wait(&self) {
+        *lock(&self.manual_idle) = true;
+        let task = lock(&self.conn_task).take();
+        if let Some(h) = task {
+            h.abort();
+            let _ = h.await;
+        }
+        let client = lock(&self.client).take();
+        if let Some(c) = client.and_then(Arc::into_inner) {
+            let _ = tokio::time::timeout(Duration::from_secs(3), c.close()).await;
+        }
+        self.disconnect();
+    }
+
+    // --- donations -----------------------------------------------------------------------
+
+    /// Downloaded again every time the sheet opens; the last copy shows until then.
+    fn donate_open(self: &Arc<Self>, lang: String) {
+        *lock(&self.donate_lang) = lang.clone();
+        let info = donations::info(&lock(&self.donations), &lang);
+        let start = {
+            let mut m = lock(&self.model);
+            let start = !m.donate.loading;
+            m.donate.loading = true;
+            m.donate.offline = false;
+            m.donate.info = Some(info);
+            start
+        };
+        self.push_model();
+        if !start {
+            return;
+        }
+        let me = Arc::clone(self);
+        self.rt.spawn(async move {
+            let fresh = tokio::task::spawn_blocking(donations::download).await.ok().flatten();
+            let offline = fresh.is_none();
+            if let Some(data) = fresh {
+                *lock(&me.donations) = data;
+            }
+            let lang = lock(&me.donate_lang).clone();
+            let info = donations::info(&lock(&me.donations), &lang);
+            me.update(|m| {
+                m.donate = DonateView {
+                    loading: false,
+                    offline,
+                    info: Some(info),
+                };
+            });
+        });
+    }
+
+    fn open_url(&self, url: &str) {
+        if let Err(e) = net::open_url(url) {
+            self.toast("err", format!("Couldn't open the browser: {e}"));
         }
     }
 
@@ -1226,6 +1622,139 @@ mod tests {
         ));
         let r: Request = serde_json::from_str(r#"{"action":"serial_stop","id":1002}"#).unwrap();
         assert!(matches!(r, Request::SerialStop { id: 1002 }));
+    }
+
+    #[test]
+    fn update_and_donate_requests_deserialize() {
+        let parse = |s: &str| serde_json::from_str::<Request>(s).unwrap();
+        assert!(matches!(parse(r#"{"action":"update_check"}"#), Request::UpdateCheck));
+        assert!(matches!(
+            parse(r#"{"action":"update_install"}"#),
+            Request::UpdateInstall
+        ));
+        assert!(matches!(parse(r#"{"action":"update_skip"}"#), Request::UpdateSkip));
+        assert!(matches!(parse(r#"{"action":"update_page"}"#), Request::UpdatePage));
+        assert!(matches!(
+            parse(r#"{"action":"set_auto_update","value":false}"#),
+            Request::SetAutoUpdate { value: false }
+        ));
+        assert!(matches!(
+            parse(r#"{"action":"donate_open","lang":"ru"}"#),
+            Request::DonateOpen { lang } if lang == "ru"
+        ));
+        assert!(matches!(
+            parse(r#"{"action":"open_url","url":"https://x"}"#),
+            Request::OpenUrl { url } if url == "https://x"
+        ));
+        let model = serde_json::to_value(Model::default()).unwrap();
+        assert_eq!(model["update"]["offer"], 0);
+        assert_eq!(model["donate"]["loading"], false);
+    }
+
+    #[test]
+    fn settings_defaults_old_files_and_round_trip() {
+        assert!(Settings::default().auto_update);
+        let old: Settings = serde_json::from_str(r#"{"adb_wifi":{},"last_target":null}"#).unwrap();
+        assert!(old.auto_update);
+        assert_eq!((old.last_update_check, old.skipped_version.as_str()), (0, ""));
+        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), Settings::default());
+        let s = Settings {
+            adb_wifi: BTreeMap::from([("R28M".to_string(), "10.0.0.2:5555".to_string())]),
+            last_target: Some(Target::Addr("phone.local".into())),
+            auto_update: false,
+            last_update_check: 1_700_000_000,
+            skipped_version: "0.2.0".into(),
+        };
+        let back: Settings = serde_json::from_slice(&serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn auto_check_once_a_day() {
+        const NOW: u64 = 1_700_000_000;
+        let at = |last_update_check| Settings {
+            last_update_check,
+            ..Settings::default()
+        };
+        assert!(should_auto_check(&at(NOW - 25 * 3600), true, NOW));
+        assert!(should_auto_check(&at(NOW - 24 * 3600), true, NOW));
+        assert!(should_auto_check(&at(0), true, NOW));
+        assert!(!should_auto_check(&at(NOW - 3 * 3600), true, NOW));
+        assert!(!should_auto_check(&at(NOW + 3600), true, NOW), "clock moved back");
+        assert!(!should_auto_check(&at(0), false, NOW), "development build");
+        let off = Settings {
+            auto_update: false,
+            ..Settings::default()
+        };
+        assert!(!should_auto_check(&off, true, NOW));
+    }
+
+    #[test]
+    fn skipped_version_is_not_offered_again() {
+        assert!(!should_offer(false, "0.2.0", "0.2.0"));
+        assert!(should_offer(true, "0.2.0", "0.2.0"));
+        assert!(should_offer(false, "0.2.0", "0.3.0"));
+        assert!(should_offer(false, "", "0.2.0"));
+    }
+
+    #[test]
+    fn update_waits_for_the_phone() {
+        let busy = |k: &str| BTreeSet::from([k.to_string()]);
+        assert!(update_blocked(&busy("install:R28M")));
+        assert!(update_blocked(&busy("pair")));
+        assert!(!update_blocked(&busy("wifi:R28M")));
+        assert!(!update_blocked(&busy("adbpair")));
+        assert!(!update_blocked(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn check_results_reach_the_page() {
+        let release = |version, with_file: bool| update::Release {
+            version,
+            file: with_file.then(|| update::Asset {
+                url: "https://x/mac.zip".into(),
+                sha256: Some("ab".into()),
+            }),
+            page_url: "https://x/page".into(),
+            notes: "notes".into(),
+        };
+        let mut view = UpdateView {
+            checking: true,
+            ..UpdateView::default()
+        };
+        let key = |v: &UpdateView| v.status.as_ref().map(|s| (s.kind, s.key));
+
+        assert!(apply_check(&mut view, Ok(release((0, 2, 0), true)), (0, 1, 0), false, "").is_some());
+        assert!(!view.checking);
+        assert_eq!(key(&view), Some(("new", "updNew")));
+        assert_eq!(view.available.as_ref().unwrap().version, "0.2.0");
+        assert_eq!((view.offer, view.no_file), (1, false));
+
+        // A skipped version: shown, not offered; a manual check offers it; a newer one is offered again.
+        apply_check(&mut view, Ok(release((0, 2, 0), true)), (0, 1, 0), false, "0.2.0");
+        assert_eq!(view.offer, 1);
+        assert!(view.available.is_some());
+        apply_check(&mut view, Ok(release((0, 2, 0), true)), (0, 1, 0), true, "0.2.0");
+        assert_eq!(view.offer, 2);
+        apply_check(&mut view, Ok(release((0, 3, 0), true)), (0, 1, 0), false, "0.2.0");
+        assert_eq!(view.offer, 3);
+
+        // A failed check keeps what was found before.
+        assert!(apply_check(&mut view, Err("offline".into()), (0, 1, 0), true, "").is_none());
+        assert_eq!(key(&view), Some(("err", "updCheckFailed")));
+        assert_eq!(view.status.as_ref().unwrap().args["err"], "offline");
+        assert!(view.available.is_some());
+
+        assert!(apply_check(&mut view, Ok(release((0, 4, 0), false)), (0, 1, 0), false, "").is_some());
+        assert_eq!(key(&view), Some(("new", "updNoFile")));
+        assert_eq!((view.offer, view.no_file), (3, true));
+
+        for latest in [(0, 1, 0), (0, 0, 9)] {
+            assert!(apply_check(&mut view, Ok(release(latest, true)), (0, 1, 0), true, "").is_none());
+            assert_eq!(key(&view), Some(("ok", "updLatest")));
+            assert_eq!(view.status.as_ref().unwrap().args["v"], "0.1.0");
+            assert_eq!((&view.available, view.no_file, view.offer), (&None, false, 3));
+        }
     }
 
     #[test]

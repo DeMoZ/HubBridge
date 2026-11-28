@@ -171,10 +171,14 @@ body::before {
 .brand { font: 650 var(--fs-l)/1 var(--font-display); letter-spacing: -.01em; }
 .top-mid { flex: 1; display: flex; justify-content: center; min-width: 0; }
 .top-actions { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-.ver { color: var(--text-3); font-size: var(--fs-s); }
 .pill { display: inline-flex; align-items: center; gap: var(--sp-2); height: 30px; padding: 0 var(--sp-3); border-radius: var(--r-pill); background: var(--surface-1); border: var(--border-w) solid var(--edge); box-shadow: inset 0 1px 0 var(--spec); font-size: var(--fs-s); color: var(--text-2); backdrop-filter: blur(28px) saturate(150%); -webkit-backdrop-filter: blur(28px) saturate(150%); white-space: nowrap; }
 button.pill { cursor: pointer; transition: background var(--dur-1), color var(--dur-1); }
 button.pill:hover { background: var(--surface-2); color: var(--text-1); }
+.pill svg { width: 14px; height: 14px; flex: none; }
+.pill .dot { display: none; }
+.pill.has-update, button.pill.has-update:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.pill.has-update .dot { display: inline-block; background: var(--accent); }
+button.pill.support:hover { color: var(--support); border-color: color-mix(in srgb, var(--support) 55%, transparent); }
 .island { max-width: 100%; min-width: 0; overflow: hidden; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .island #stText { display: inline-flex; min-width: 0; overflow: hidden; white-space: nowrap; }
@@ -307,13 +311,37 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
 .sheet .x { width: 30px; height: 30px; border-radius: 50%; border: 0; background: transparent; color: var(--text-2); cursor: pointer; font-size: 15px; line-height: 1; transition: background var(--dur-1), color var(--dur-1); }
 .sheet .x:hover { background: var(--surface-3); color: var(--text-1); }
 .pin { margin-top: var(--sp-4); height: 64px; font: 600 32px/1 var(--font-mono); letter-spacing: 14px; text-align: center; padding: 0 0 0 14px; }
-.sheet .actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-5); }
+.sheet .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-5); }
+
+/* update and support sheets */
+[hidden] { display: none !important; }
+.sheet { max-height: calc(100vh - 32px); overflow-y: auto; }
+.sheet.wide { width: 480px; }
+.sheet .ico.support { color: var(--support); }
+.notes { margin-top: var(--sp-3); max-height: 240px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px var(--sp-3); border-radius: var(--r-card); background: var(--surface-2); border: var(--border-w) solid var(--edge); color: var(--text-2); font-size: var(--fs-s); }
+.sheet .warnline { margin-top: var(--sp-3); }
+.status-line { display: flex; align-items: center; gap: var(--sp-2); min-height: 18px; margin-top: var(--sp-3); font-size: var(--fs-s); color: var(--text-2); overflow-wrap: anywhere; }
+.status-line > span:last-child { min-width: 0; }
+.status-line.ok { color: var(--ok); }
+.status-line.err { color: var(--err); }
+.status-line.new { color: var(--accent); }
+.spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--edge-strong); border-top-color: var(--accent); animation: rot .9s linear infinite; flex: none; display: inline-block; }
+.sheet h3 .spinner { margin-left: var(--sp-2); vertical-align: -1px; }
+.tick { display: flex; gap: var(--sp-2); align-items: flex-start; margin: var(--sp-3) 0 var(--sp-2); cursor: pointer; color: var(--text-2); font-size: var(--fs-s); }
+.tick input { flex: none; margin-top: 1px; }
+.methods { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-4); }
+.method { display: grid; grid-template-columns: 34px 1fr auto; gap: var(--sp-3); align-items: center; text-align: left; padding: 10px var(--sp-3); border-radius: var(--r-card); background: var(--surface-2); border: var(--border-w) solid var(--edge); cursor: pointer; color: var(--text-1); transition: border-color var(--dur-1); }
+.method:hover { border-color: var(--edge-strong); }
+.method .emoji { font-size: var(--fs-xl); text-align: center; }
+.method b { display: block; font-weight: 600; }
+.method .desc { display: block; margin-top: 2px; color: var(--text-2); font-size: var(--fs-s); line-height: 1.4; }
+.method .arrow { color: var(--text-2); }
 
 /* preference overrides */
 @media (prefers-reduced-motion: reduce) {
   body::before { animation: none; }
   .dot.wait { animation: none; }
-  .btn .spin { animation: none; }
+  .btn .spin, .spinner { animation: none; }
   .toast, .modal.open, .modal.open .sheet { animation: fade-in var(--dur-2) linear; }
   * { transition-duration: 120ms !important; transition-property: opacity, color, background-color, border-color !important; }
   .btn:active { transform: none; }
@@ -359,7 +387,10 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M5 16C8 7 16 7 19 16" stroke-width="2.2"/><path d="M3 20h18" stroke-width="1.6" opacity=".5"/><circle cx="5" cy="16" r="2.2" fill="currentColor" stroke="none"/><circle cx="19" cy="16" r="2.2" fill="currentColor" stroke="none"/></svg></div>
     <span class="brand">HubBridge</span>
     <div class="top-mid"><span class="pill island" id="status"><span id="stMark" aria-hidden="true"></span><span id="stText" aria-hidden="true"></span><span class="vh" id="stLive" role="status"></span></span></div>
-    <div class="top-actions" id="topActions"><span class="ver" id="ver"></span></div>
+    <div class="top-actions" id="topActions">
+      <button class="pill" id="updBtn" type="button"><span class="dot" aria-hidden="true"></span><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16V4M5 9l5-5 5 5"/></svg><span class="num" id="updLabel"></span></button>
+      <button class="pill support" id="donateBtn" type="button"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.3C.9 8.3 3 4.5 6.7 4.5c2.1 0 3.5 1.2 4.3 2.4.8-1.2 2.2-2.4 4.3-2.4 3.7 0 5.8 3.8 4.3 7.2C19.5 16.4 12 21 12 21z"/></svg><span data-t="donate"></span></button>
+    </div>
   </header>
   <div class="main">
     <div class="col">
@@ -411,6 +442,35 @@ input.field::placeholder { color: var(--text-2); opacity: 1; }
     <div class="actions"><button class="btn ghost" id="pairCancel" data-t="cancel"></button><button class="btn primary" id="pairGo" data-t="pair"></button></div>
   </div>
 </div>
+<div class="modal" id="donateModal" role="dialog" aria-modal="true" aria-labelledby="donateTitle">
+  <div class="sheet wide">
+    <div class="sh">
+      <div class="ico support"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.3C.9 8.3 3 4.5 6.7 4.5c2.1 0 3.5 1.2 4.3 2.4.8-1.2 2.2-2.4 4.3-2.4 3.7 0 5.8 3.8 4.3 7.2C19.5 16.4 12 21 12 21z"/></svg></div>
+      <h3 id="donateTitle" tabindex="-1"><span data-t="donateHeading"></span><span class="spinner" id="donateSpin" aria-hidden="true" hidden></span></h3>
+      <button class="x" id="donateClose" type="button" data-first>✕</button>
+    </div>
+    <div class="sub" id="donateMessage"></div>
+    <div class="methods" id="donateMethods"></div>
+    <div class="sub warnline" id="donateOffline" data-t="donateOffline" role="status" hidden></div>
+  </div>
+</div>
+<div class="modal" id="updateModal" role="dialog" aria-modal="true" aria-labelledby="updTitle">
+  <div class="sheet wide">
+    <div class="sh">
+      <div class="ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16V4M5 9l5-5 5 5"/></svg></div>
+      <h3 id="updTitle" tabindex="-1"></h3>
+      <button class="x" id="updClose" type="button" data-first>✕</button>
+    </div>
+    <div class="sub" id="updCurrent"></div>
+    <div class="notes sel" id="updNotes" tabindex="0" hidden></div>
+    <div class="sub warnline" id="updWarn" data-t="updWarn" hidden></div>
+    <div class="sub warnline" id="updBridges" data-t="updBridges" hidden></div>
+    <div class="status-line sel" id="updStatus" role="status"></div>
+    <label class="tick"><input type="checkbox" id="autoUpdate"> <span data-t="autoUpdate"></span></label>
+    <div class="sub" id="updDev" data-t="updDev" hidden></div>
+    <div class="actions" id="updActions"></div>
+  </div>
+</div>
 <script>
 "use strict";
 const PLATFORM = "/*PLATFORM*/";
@@ -444,6 +504,21 @@ const I18N = {
     serialT: "Serial", baudT: "Baud", ptyT: "PTY", tcpT: "TCP port", rfcT: "RFC 2217", startT: "Start", stopT: "Stop", copyT: "Copy",
     sent: "sent", failedT: "failed", received: "received", droppedT: "dropped", lineErr: "line errors", stoppedWhy: "Stopped: {r}",
     pickFront: "Choose a PTY or a TCP port.", badBaud: "Baud rate: a number, e.g. 115200.", badPort: "TCP port: a number from 1 to 65535.",
+    donate: "Support", donateTip: "Support development", donateHeading: "Thanks for using HubBridge!",
+    donateOffline: "Couldn't load the latest list, showing a saved copy.",
+    updatesTip: "Updates", updTitle: "Updates", updAvailableTitle: "Version {v} is available",
+    updCurrent: "Installed version: {v}. New versions come from GitHub releases.",
+    autoUpdate: "Check for updates automatically (once a day)",
+    updDev: "Updating works only in the built app (from the release .dmg or .zip).",
+    updWarn: "This copy can't update itself (no permission to write to its folder). Download the new version from the release page.",
+    versionBtn: "v{v} is out", checking: "Checking…", btnSkip: "Skip this version", btnLater: "Later",
+    btnInstall: "Update and restart", btnPage: "Open release page", btnAll: "All versions", btnUpdCheck: "Check for updates",
+    updateFailedToast: "The update didn't install, so the previous version is running. Download the new one from the release page.",
+    updNew: "Version {v} is available.", updLatest: "You have the latest version, {v}.",
+    updCheckFailed: "Couldn't check for updates: {err}", updDownloading: "Downloading HubBridge {v}…",
+    updRestarting: "Update downloaded, restarting…", updFailed: "The update wasn't installed: {err}",
+    updNoFile: "Version {v} is out, but it has no download for this system.",
+    updWaitBusy: "Wait until the phone action finishes, then update.", updBridges: "Running serial bridges will stop.",
   },
   ru: {
     network: "В этой сети", byAddress: "Подключиться по IP-адресу", connect: "Подключить", adb: "USB и ADB",
@@ -472,6 +547,21 @@ const I18N = {
     serialT: "Serial", baudT: "Скорость", ptyT: "PTY", tcpT: "TCP-порт", rfcT: "RFC 2217", startT: "Запустить", stopT: "Остановить", copyT: "Копировать",
     sent: "отправлено", failedT: "не ушло", received: "получено", droppedT: "потеряно", lineErr: "ошибок линии", stoppedWhy: "Остановлено: {r}",
     pickFront: "Выберите PTY или TCP-порт.", badBaud: "Скорость: число, например 115200.", badPort: "TCP-порт: число от 1 до 65535.",
+    donate: "Поддержать", donateTip: "Поддержать разработку", donateHeading: "Спасибо, что пользуетесь HubBridge!",
+    donateOffline: "Свежий список способов загрузить не удалось: показана сохранённая копия.",
+    updatesTip: "Обновления", updTitle: "Обновления", updAvailableTitle: "Доступна версия {v}",
+    updCurrent: "Установлена версия {v}. Новые версии берутся из релизов на GitHub.",
+    autoUpdate: "Проверять обновления автоматически (раз в сутки)",
+    updDev: "Обновление работает только в собранной программе (из .dmg или .zip релиза).",
+    updWarn: "Эта копия не может обновить себя сама (нет прав на запись в её папку): скачайте новую версию со страницы релиза.",
+    versionBtn: "Вышла v{v}", checking: "Проверяю…", btnSkip: "Пропустить версию", btnLater: "Позже",
+    btnInstall: "Обновить и перезапустить", btnPage: "Открыть страницу релиза", btnAll: "Все версии", btnUpdCheck: "Проверить обновления",
+    updateFailedToast: "Обновление не установилось, работает прежняя версия. Скачайте новую со страницы релиза.",
+    updNew: "Доступна версия {v}.", updLatest: "У вас последняя версия, {v}.",
+    updCheckFailed: "Не удалось проверить обновления: {err}", updDownloading: "Скачиваю HubBridge {v}…",
+    updRestarting: "Обновление скачано, перезапуск…", updFailed: "Обновление не установлено: {err}",
+    updNoFile: "Вышла версия {v}, но для этой системы в ней нет файла для скачивания.",
+    updWaitBusy: "Дождитесь окончания действия с телефоном, потом обновляйте.", updBridges: "Запущенные мосты последовательных портов остановятся.",
   },
 };
 const LANG = (navigator.language || "en").toLowerCase().startsWith("ru") ? "ru" : "en";
@@ -481,8 +571,9 @@ function t(key, args) {
   return s;
 }
 for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
-document.getElementById("pairClose").setAttribute("aria-label", t("close"));
-document.getElementById("pairClose").title = t("close");
+for (const x of document.querySelectorAll(".sheet .x")) { x.setAttribute("aria-label", t("close")); x.title = t("close"); }
+document.getElementById("updBtn").title = t("updatesTip");
+document.getElementById("donateBtn").title = t("donateTip");
 
 // Not named `ipc`: wry owns the non-configurable global `window.ipc`, and a top-level
 // `const ipc` would make WebKit reject the whole script.
@@ -502,8 +593,8 @@ function focusSel(el) {
   if (!d.length) return null;
   return el.tagName.toLowerCase() + d.map(([k, v]) => `[data-${k}="${String(v).replace(/["\\]/g, "\\$&")}"]`).join("");
 }
-const headingOf = (panel) => panel.querySelector("h2") || panel;
-// Re-rendering replaces the markup; keep the keyboard focus on the same control (or the panel heading).
+const headingOf = (box) => box.querySelector(box.classList.contains("sheet") ? "h3" : "h2") || box;
+// Re-rendering replaces the markup; keep the keyboard focus on the same control (or the panel or sheet heading).
 function put(id, html) {
   if (rendered[id] === html) return;
   rendered[id] = html;
@@ -514,7 +605,7 @@ function put(id, html) {
     let n = null;
     try { n = host.querySelector(sel); } catch (e) {}
     if (n && !n.disabled) { n.focus(); if (document.activeElement === n) return; }
-    headingOf(host.closest(".panel") || host).focus();
+    headingOf(host.closest(".panel, .sheet") || host).focus();
   }
 }
 
@@ -742,13 +833,79 @@ function renderDevices() {
   }).join("")}</div>`);
 }
 
-function render() {
-  if (!M) return;
-  $("ver").textContent = "v" + M.version;
-  renderStatus(); renderAgents(); renderPhones(); renderConn(); renderDevices();
+// Only a changed text is written, so a selection or a scroll position survives the pushes of every second.
+const setText = (id, s) => { if ($(id).textContent !== s) $(id).textContent = s; };
+// Hiding the focused control would drop the focus to the body: it moves to the sheet heading first.
+function setHidden(id, hidden) {
+  const el = $(id);
+  if (hidden && !el.hidden && el.contains(document.activeElement)) headingOf(el.closest(".sheet")).focus();
+  el.hidden = hidden;
+}
+const sheetBtn = (label, act, cls, disabled = false) => `<button class="btn ${cls}" type="button" data-act="${act}" ${disabled ? "disabled" : ""}>${esc(label)}</button>`;
+
+function renderUpdate() {
+  const u = M.update, a = u.available;
+  const installable = u.can_update && u.writable && !u.no_file;
+  $("updBtn").classList.toggle("has-update", !!a);
+  setText("updLabel", a ? t("versionBtn", { v: a.version }) : "v" + M.version);
+  setText("updTitle", a ? t("updAvailableTitle", { v: a.version }) : t("updTitle"));
+  setText("updCurrent", t("updCurrent", { v: M.version }));
+  setHidden("updNotes", !(a && a.notes));
+  setText("updNotes", a ? a.notes : "");
+  setHidden("updWarn", !(a && u.can_update && !u.writable && !u.no_file));
+  setHidden("updBridges", !(a && installable && (M.serial || []).some((v) => v.running)));
+  setHidden("updDev", u.can_update);
+  $("autoUpdate").checked = u.auto_update;
+  const text = u.status ? t(u.status.key, u.status.args) : "";
+  const busy = u.checking || u.downloading;
+  $("updStatus").className = "status-line sel " + (u.checking ? "" : u.downloading ? "new" : u.status ? u.status.kind : "");
+  put("updStatus", (busy ? '<span class="spinner" aria-hidden="true"></span>' : "") + `<span>${esc(u.checking ? t("checking") : text)}</span>`);
+  let actions;
+  if (a && u.no_file) actions = sheetBtn(t("btnPage"), "updpage", "primary");
+  else if (a) {
+    actions = sheetBtn(t("btnSkip"), "updskip", "ghost", busy) + sheetBtn(t("btnLater"), "updlater", "ghost", u.downloading) +
+      (installable ? sheetBtn(t("btnInstall"), "updinstall", "primary", busy) : sheetBtn(t("btnPage"), "updpage", "primary"));
+  } else actions = sheetBtn(t("btnAll"), "updpage", "ghost") + sheetBtn(t("btnUpdCheck"), "updcheck", "primary", busy || !u.can_update);
+  put("updActions", actions);
 }
 
-window.onState = (m) => { M = m; M.busy = m.busy || []; render(); };
+const METHOD_ICON = { cloudtips: "💳", tribute: "🌍" };
+function renderDonate() {
+  const d = M.donate, info = d.info || { message: null, methods: [] };
+  setHidden("donateSpin", !d.loading);
+  setText("donateMessage", info.message || "");
+  setHidden("donateOffline", !d.offline);
+  put("donateMethods", info.methods.map((m) => `<button type="button" class="method" data-act="openurl" data-value="${esc(m.url)}" title="${esc(m.url)}">
+    <span class="emoji" aria-hidden="true">${Object.hasOwn(METHOD_ICON, m.id) ? METHOD_ICON[m.id] : "🤝"}</span>
+    <span><b>${esc(m.title)}</b>${m.description ? `<span class="desc">${esc(m.description)}</span>` : ""}</span>
+    <span class="arrow" aria-hidden="true">↗</span></button>`).join(""));
+}
+
+function render() {
+  if (!M) return;
+  renderStatus(); renderAgents(); renderPhones(); renderConn(); renderDevices(); renderUpdate(); renderDonate();
+}
+
+// `update.offer` grows when a check wants the update sheet open; the failed-update toast shows once.
+let lastOffer = 0;
+let failedShown = false;
+function offerUpdate() {
+  if ($("updateModal").classList.contains("open")) return;
+  // Not over the PIN field: the sheet opens when the pairing sheet is closed.
+  if ($("pairModal").classList.contains("open")) {
+    $("pairModal").addEventListener("sheetclose", () => setTimeout(offerUpdate, 0), { once: true });
+    return;
+  }
+  openSheet("updateModal", "updBtn");
+}
+
+window.onState = (m) => {
+  M = m;
+  M.busy = m.busy || [];
+  render();
+  if (M.update.failed_launch && !failedShown) { failedShown = true; window.onToast("err", t("updateFailedToast")); }
+  if (M.update.offer > lastOffer) { lastOffer = M.update.offer; offerUpdate(); }
+};
 window.onToast = (kind, text) => {
   const el = document.createElement("div");
   el.className = "toast " + (kind === "err" ? "err" : "");
@@ -761,16 +918,19 @@ window.onToast = (kind, text) => {
 };
 
 // Sheets: shared by the pairing sheet and the sheets of later changes.
-const focusables = (m) => [...m.querySelectorAll("button, input, [tabindex]")].filter((e) => !e.disabled && e.tabIndex >= 0);
+const focusables = (m) => [...m.querySelectorAll("button, input, [tabindex]")].filter((e) => !e.disabled && e.tabIndex >= 0 && !e.closest("[hidden]"));
 // While a sheet is open the rest of the page is inert: no focus, no clicks, hidden from assistive tech.
 const setInert = (on) => { for (const el of document.querySelectorAll(".app, .toasts")) el.inert = on; };
-function openSheet(id) {
+// `fallback`: the id that gets the focus back when nothing was focused (the sheet opened by itself, or WebKit did
+// not focus the clicked button).
+function openSheet(id, fallback) {
   const m = $(id);
-  const o = document.activeElement;
-  m._opener = o && o !== document.body ? { el: o, sel: focusSel(o), panel: o.closest(".panel") } : null;
+  let o = document.activeElement;
+  if ((!o || o === document.body) && fallback) o = $(fallback);
+  m._opener = o && o !== document.body ? { el: o, sel: focusSel(o), panel: o.closest(".panel, .sheet") } : null;
   m.classList.add("open");
   setInert(true);
-  setTimeout(() => { const f = m.querySelector("input") || m.querySelector("button"); if (f) f.focus(); }, 30);
+  setTimeout(() => { const f = m.querySelector("[data-first]") || m.querySelector("input") || m.querySelector("button"); if (f) f.focus(); }, 30);
 }
 function closeSheet(id) {
   const m = $(id);
@@ -823,6 +983,12 @@ $("pairClose").onclick = closePair;
 $("pin").addEventListener("keydown", (e) => { if (e.key === "Enter") submitPair(); });
 $("pin").addEventListener("input", () => { $("pin").value = $("pin").value.replace(/\D/g, "").slice(0, 6); if ($("pin").value.length === 6) submitPair(); });
 
+$("updBtn").onclick = () => openSheet("updateModal", "updBtn");
+$("updClose").onclick = () => closeSheet("updateModal");
+$("autoUpdate").onchange = (e) => send({ action: "set_auto_update", value: e.target.checked });
+$("donateBtn").onclick = () => { openSheet("donateModal", "donateBtn"); send({ action: "donate_open", lang: LANG }); };
+$("donateClose").onclick = () => closeSheet("donateModal");
+
 $("addrGo").onclick = () => { const v = $("addr").value.trim(); if (v) send({ action: "connect", target: { kind: "addr", value: v } }); };
 $("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") $("addrGo").click(); });
 $("wpGo").onclick = () => { const a = $("wpAddr").value.trim(), c = $("wpCode").value.trim(); if (a && c) send({ action: "adb_pair", addr: a, code: c }); };
@@ -854,6 +1020,12 @@ document.addEventListener("click", (e) => {
       break;
     }
     case "serialstop": send({ action: "serial_stop", id: Number(d.id) }); break;
+    case "updcheck": send({ action: "update_check" }); break;
+    case "updinstall": send({ action: "update_install" }); break;
+    case "updskip": send({ action: "update_skip" }); closeSheet("updateModal"); break;
+    case "updlater": closeSheet("updateModal"); break;
+    case "updpage": send({ action: "update_page" }); break;
+    case "openurl": send({ action: "open_url", url: d.value }); break;
     case "copy": navigator.clipboard && navigator.clipboard.writeText(d.text).then(() => window.onToast("ok", d.text), () => {}); break;
     case "toggle": { const id = Number(d.id); expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderDevices(); break; }
   }

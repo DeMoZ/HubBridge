@@ -76,6 +76,12 @@ cargo run -p hubbridge-desktop --release      # opens the HubBridge window
   with a graph; reconnects by itself; remembers the last phone and connects at start.
 - USB devices on the phone with configurations / interfaces / endpoints and **Ask phone**
   for USB permission.
+- **Updates**: the version button in the top bar checks the GitHub releases. The app also checks
+  by itself at most once a day (this can be turned off) and offers a new version, which you can
+  install (**Update and restart**) or skip (**Skip this version**). Running serial bridges stop
+  before the restart. Updating works only in the app from a release; a development build
+  (`cargo run`) cannot update itself.
+- **♥ Support**: ways to support the development; each one opens its payment page in the browser.
 
 Uses the system WebView (tao + wry). adb is optional: needed only for the cable, installing
 the app and ADB over Wi-Fi (`brew install android-platform-tools` on macOS).

@@ -102,6 +102,6 @@ Step 2a ✅ (generic transfers, tested with fakes; real-phone test pending):
 - Structured logs on both ends with export; diagnostic bundle.
 - Android: battery-optimization exemption flow, Quick Settings tile, "keep screen on" mode,
   PIN-less pairing over ADB (the host pushes a one-time secret with `adb shell`).
-- Updates and Support button like the other DeMoZ apps.
+- [x] Updates and Support button like the other DeMoZ apps.
 - Signed release builds: the APK is signed with the release key; the macOS app is only ad-hoc
   signed (Developer ID signing and notarization are open).
