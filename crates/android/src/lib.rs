@@ -11,10 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use hubbridge_agent::video::{FrameResult, SinkStats, VideoSink};
 use hubbridge_agent::{Agent, AgentCallbacks, AgentConfig};
-use hubbridge_proto::{ConfigInfo, DisplayInfo, DisplayList, DisplayMode, UsbDeviceInfo};
-use jni::objects::{GlobalRef, JObject, JString};
-use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jstring};
+use hubbridge_proto::{
+    ConfigInfo, DisplayInfo, DisplayList, DisplayMode, MirrorEnd, UsbDeviceInfo, VideoConfig, VideoFrame,
+};
+use jni::objects::{GlobalRef, JObject, JString, JValue};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use serde::Deserialize;
 
@@ -189,6 +192,167 @@ impl AgentCallbacks for JavaCallbacks {
     }
 }
 
+// --- video output: `MirrorOutput.kt` ----------------------------------------------------
+
+/// `onVideoFrame` flags.
+const FRAME_KEY: jint = 1;
+const FRAME_CONFIG: jint = 2;
+
+/// Why `onMirrorStart` failed, in words: the codes of `MirrorOutput.kt`.
+fn start_result(code: jint) -> Result<(), String> {
+    Err(match code {
+        0 => return Ok(()),
+        1 => "Samsung DeX is on: turn DeX off on the phone (the monitor then mirrors the screen), then start again",
+        2 => "the phone cannot show a picture on this display (is the monitor still attached?)",
+        3 => "the phone did not open a window on the display: unlock the phone and start again",
+        4 => "the phone has no H.264 decoder for this picture size",
+        5 => "the phone's video decoder did not start",
+        _ => "the phone could not start the video output",
+    }
+    .to_string())
+}
+
+/// What `onVideoFrame` answers.
+fn frame_result(code: Option<jint>) -> FrameResult {
+    match code {
+        Some(0) => FrameResult::Queued,
+        Some(1) => FrameResult::NoInput,
+        Some(2) => FrameResult::NeedKeyframe,
+        _ => FrameResult::Failed(MirrorEnd::DecoderFailed, "the phone's video decoder failed".into()),
+    }
+}
+
+/// The reason codes of `mirrorFailed` in `MirrorOutput.kt`.
+fn end_reason(code: jint) -> MirrorEnd {
+    match code {
+        1 => MirrorEnd::DecoderFailed,
+        2 => MirrorEnd::DecoderStalled,
+        3 => MirrorEnd::DisplayRemoved,
+        _ => MirrorEnd::SurfaceLost,
+    }
+}
+
+/// The decoder counters as `MirrorDecoder.kt` writes them.
+#[derive(Deserialize)]
+struct AndroidSinkStats {
+    decoded: u64,
+    dropped: u64,
+    bad: u64,
+    decode_us: u32,
+}
+
+fn parse_sink_stats(json: &str) -> SinkStats {
+    serde_json::from_str::<AndroidSinkStats>(json).map_or_else(
+        |_| SinkStats::default(),
+        |s| SinkStats {
+            decoded: s.decoded,
+            dropped: s.dropped,
+            bad: s.bad,
+            decode_us: s.decode_us,
+        },
+    )
+}
+
+/// The agent's video output is the app: a window on the monitor and a `MediaCodec` decoder.
+/// The agent calls it from threads that may block.
+struct AndroidSink(Arc<JavaCallbacks>);
+
+impl AndroidSink {
+    /// Run JNI calls with a local reference frame: the calling threads live long, and every
+    /// frame makes references.
+    fn with_env<T>(&self, call: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<T>) -> Option<T> {
+        let mut env = self.0.vm.attach_current_thread_permanently().ok()?;
+        let target = self.0.target.as_obj();
+        match env.with_local_frame(8, |env| call(env, target)) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
+}
+
+impl VideoSink for AndroidSink {
+    fn start(&self, stream: u64, display: &DisplayInfo, config: &VideoConfig) -> Result<(), String> {
+        let args = [
+            JValue::Long(stream as jlong),
+            JValue::Int(display.id as jint),
+            JValue::Int(config.width as jint),
+            JValue::Int(config.height as jint),
+            JValue::Int(config.fps as jint),
+        ];
+        let code = self.with_env(|env, target| env.call_method(target, "onMirrorStart", "(JIIII)I", &args)?.i());
+        start_result(code.unwrap_or(-1))
+    }
+
+    fn frame(&self, stream: u64, frame: &VideoFrame) -> FrameResult {
+        let flags = if frame.keyframe { FRAME_KEY } else { 0 } | if frame.config { FRAME_CONFIG } else { 0 };
+        let code = self.with_env(|env, target| {
+            let data = env.byte_array_from_slice(&frame.data)?;
+            let args = [
+                JValue::Long(stream as jlong),
+                JValue::Object(&data),
+                JValue::Long(frame.pts_us as jlong),
+                JValue::Int(flags),
+            ];
+            env.call_method(target, "onVideoFrame", "(J[BJI)I", &args)?.i()
+        });
+        frame_result(code)
+    }
+
+    fn stats(&self, stream: u64) -> SinkStats {
+        self.with_env(|env, target| {
+            let json = env
+                .call_method(
+                    target,
+                    "onMirrorStats",
+                    "(J)Ljava/lang/String;",
+                    &[JValue::Long(stream as jlong)],
+                )?
+                .l()?;
+            let json = JString::from(json);
+            Ok(parse_sink_stats(&String::from(env.get_string(&json)?)))
+        })
+        .unwrap_or_default()
+    }
+
+    fn stop(&self, stream: u64) {
+        self.0.call("onMirrorStop", "(J)V", &[JValue::Long(stream as jlong)]);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_mirrorFailed<'l>(
+    mut env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    stream: jlong,
+    reason: jint,
+    message: JString<'l>,
+) {
+    let message = jstr(&mut env, &message);
+    with_agent(|a| a.mirror_failed(stream as u64, end_reason(reason), &message));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_requestKeyframe<'l>(
+    _env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    stream: jlong,
+) {
+    with_agent(|a| a.request_keyframe(stream as u64));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_demoz_hubbridge_NativeAgent_setPhoneLocked<'l>(
+    _env: JNIEnv<'l>,
+    _this: JObject<'l>,
+    locked: jboolean,
+) {
+    with_agent(|a| a.set_phone_locked(locked != 0));
+}
+
 /// USB through the app: Kotlin opens the `UsbDeviceConnection` and returns its fd
 /// (`onOpenDevice`: fd, or -1 no permission, -2 no such device, -3 open failed); we work on
 /// a duplicate and tell Kotlin when to close the connection (`onCloseDevice`).
@@ -272,6 +436,7 @@ fn start(
     })?;
     #[cfg(target_os = "android")]
     agent.set_usb_backend(usb_backend(Arc::clone(&callbacks)));
+    agent.set_video_sink(Arc::new(AndroidSink(Arc::clone(&callbacks))));
     agent.set_callbacks(callbacks);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -517,6 +682,50 @@ mod tests {
             assert!(
                 kotlin.contains(&format!(".put(\"{field}\"")),
                 "DisplayWatcher.kt: {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_output_codes() {
+        assert_eq!(start_result(0), Ok(()));
+        assert!(start_result(1).unwrap_err().contains("turn DeX off"));
+        for code in [2, 3, 4, 5, -1, 99] {
+            assert!(!start_result(code).unwrap_err().is_empty(), "{code}");
+        }
+        assert_eq!(frame_result(Some(0)), FrameResult::Queued);
+        assert_eq!(frame_result(Some(1)), FrameResult::NoInput);
+        assert_eq!(frame_result(Some(2)), FrameResult::NeedKeyframe);
+        for failed in [Some(3), None] {
+            assert!(matches!(
+                frame_result(failed),
+                FrameResult::Failed(MirrorEnd::DecoderFailed, _)
+            ));
+        }
+        assert_eq!(end_reason(0), MirrorEnd::SurfaceLost);
+        assert_eq!(end_reason(1), MirrorEnd::DecoderFailed);
+        assert_eq!(end_reason(2), MirrorEnd::DecoderStalled);
+        assert_eq!(end_reason(3), MirrorEnd::DisplayRemoved);
+    }
+
+    #[test]
+    fn parses_decoder_stats_json() {
+        let got = parse_sink_stats(r#"{"decoded":90,"dropped":2,"bad":1,"decode_us":4200}"#);
+        assert_eq!(
+            got,
+            SinkStats {
+                decoded: 90,
+                dropped: 2,
+                bad: 1,
+                decode_us: 4200
+            }
+        );
+        assert_eq!(parse_sink_stats(""), SinkStats::default());
+        let kotlin = include_str!("../../../android/app/src/main/kotlin/com/demoz/hubbridge/MirrorDecoder.kt");
+        for field in ["decoded", "dropped", "bad", "decode_us"] {
+            assert!(
+                kotlin.contains(&format!(".put(\"{field}\"")),
+                "MirrorDecoder.kt: {field}"
             );
         }
     }

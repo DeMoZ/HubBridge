@@ -26,6 +26,20 @@ object NativeAgent {
 
         /** The host closed the device: close the connection opened in [onOpenDevice]. */
         fun onCloseDevice(deviceId: Int)
+
+        // The video output of a mirror (see [MirrorOutput]). Called from threads that may block.
+
+        /** Show a surface on the display and start a decoder: 0, or an error code. */
+        fun onMirrorStart(streamId: Long, displayId: Int, width: Int, height: Int, fps: Int): Int
+
+        /** One Annex B frame: 0 queued, 1 no input buffer in time, 2 send a keyframe. */
+        fun onVideoFrame(streamId: Long, data: ByteArray, ptsUs: Long, flags: Int): Int
+
+        /** The decoder's counters as JSON. */
+        fun onMirrorStats(streamId: Long): String
+
+        /** Remove the picture. */
+        fun onMirrorStop(streamId: Long)
     }
 
     /**
@@ -57,6 +71,13 @@ object NativeAgent {
 
     /** JSON from [DisplayWatcher]. */
     external fun setDisplays(json: String)
+
+    /** The app cannot go on showing a stream; `reason` is one of the [MirrorOutput] codes. */
+    external fun mirrorFailed(streamId: Long, reason: Int, message: String)
+
+    external fun requestKeyframe(streamId: Long)
+
+    external fun setPhoneLocked(locked: Boolean)
 
     /** JSON of `hubbridge_agent::AgentStatus`, or "" if not running. */
     external fun status(): String

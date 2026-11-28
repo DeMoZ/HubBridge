@@ -3,7 +3,6 @@ package com.demoz.hubbridge
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.ConnectivityManager
@@ -67,23 +66,11 @@ class MainActivity : Activity() {
 
         setContentView(ScrollView(this).apply { addView(col) })
         handleUsbIntent(intent)
-        // Not again when the activity is recreated.
-        if (savedInstanceState == null) handleSpikeIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleUsbIntent(intent)
-        handleSpikeIntent(intent)
-    }
-
-    /** `am start … --es spike <route>` (design D1). The only way into the spike: debuggable builds only. */
-    private fun handleSpikeIntent(intent: Intent?) {
-        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
-        // Reopening from Recents replays the old intent.
-        if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
-        val route = intent.getStringExtra("spike") ?: return
-        BridgeService.sendSpike(this, route)
     }
 
     /** Opened by USB_DEVICE_ATTACHED ("open HubBridge for this device?"): permission is now granted. */
@@ -138,12 +125,11 @@ class MainActivity : Activity() {
             } else {
                 append("Listening on 127.0.0.1:$port — reach it with `hubbridge adb`.\n")
             }
-            val sessions = st?.optJSONArray("sessions")
-            if (sessions == null || sessions.length() == 0) {
+            val sessions = BridgeService.computers(st)
+            if (sessions.isEmpty()) {
                 append("No computer connected.")
             } else {
-                for (i in 0 until sessions.length()) {
-                    val s = sessions.getJSONObject(i)
+                for (s in sessions) {
                     val via = if (s.optBoolean("via_adb")) "ADB" else s.optString("peer")
                     append("Connected: ${s.optString("host_name")} ($via)\n")
                 }

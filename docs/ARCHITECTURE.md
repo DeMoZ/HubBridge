@@ -46,8 +46,10 @@ flowchart LR
 |---|---|---|
 | `MainActivity` | Kotlin | Start/stop, Wi-Fi+ADB or ADB-only mode, PIN for pairing, device list, paired computers. Receives `USB_DEVICE_ATTACHED` so the user can tick "always open HubBridge" (persistent per-device permission). |
 | `BridgeService` | Kotlin | Foreground service of type `connectedDevice` with an ongoing notification. Holds a partial wake lock and a `WIFI_MODE_FULL_LOW_LATENCY` lock, registers `_hubbridge._tcp` with `NsdManager`, listens for attach/detach/permission broadcasts, asks for USB permission when a host requests it. |
+| `DisplayWatcher` | Kotlin | Presentation displays (monitors on the USB-C port or hub) and the Samsung DeX flag as JSON, on every `DisplayListener` event. |
+| `MirrorOutput`, `MirrorPresentation`, `MirrorDecoder` | Kotlin | The video output of a mirror: a `Presentation` on the monitor opened by the service (needs DeX off) with a surface of the stream's shape between black bars, and a `MediaCodec` H.264 decoder in low-latency mode rendering the newest picture. Start refusals, lost surfaces and decoder errors go back to the agent. |
 | `UsbScanner` | Kotlin | Builds the device list from `UsbManager`: ids, class, configurations, interfaces, endpoints; with permission also the serial and the raw descriptors (`UsbDeviceConnection.getRawDescriptors()`). |
-| `NativeAgent` / `crates/android` | Kotlin ↔ Rust (JNI) | Thin JSON bridge; Rust calls back `onPermissionRequested` / `onStatusChanged`. |
+| `NativeAgent` / `crates/android` | Kotlin ↔ Rust (JNI) | Thin JSON bridge; Rust calls back `onPermissionRequested` / `onStatusChanged`, USB open/close, and for mirrors `onMirrorStart` / `onVideoFrame` / `onMirrorStats` / `onMirrorStop` (the video output behind the agent's `VideoSink`). |
 | `crates/agent` | Rust | TCP server (dual-stack `[::]` in LAN mode, `127.0.0.1` in ADB-only mode), pairing window (6-digit PIN, 120 s, 3 attempts), paired hosts store, sessions, device registry with diff → `DeviceAdded`/`DeviceRemoved` events, idle timeout; phone displays and mirroring (below). |
 
 **Displays and mirroring in `crates/agent`** (`video.rs`; messages in [PROTOCOL.md](PROTOCOL.md)):
@@ -224,6 +226,8 @@ HubBridge/
 │       ├── MainActivity.kt    UI
 │       ├── BridgeService.kt   foreground service, locks, NSD, USB events
 │       ├── UsbScanner.kt      UsbManager → JSON
+│       ├── DisplayWatcher.kt  presentation displays → JSON
+│       ├── Mirror*.kt         video output on the monitor: window, decoder, running streams
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
 ├── scripts/                   make-icon.sh / make-icon.swift: redraw the app icon (macOS);
