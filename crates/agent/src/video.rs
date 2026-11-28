@@ -34,6 +34,7 @@ pub const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// decoder configuration.
 const SINK_QUEUE: usize = 3;
 const MAX_FPS: u32 = 60;
+const START_TOO_SLOW: &str = "the phone did not show the picture in time";
 
 /// What the decoder did with a frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,13 @@ fn error(code: ErrorCode, message: impl Into<String>) -> Message {
         code,
         message: message.into(),
     }
+}
+
+fn unknown_display(display_id: u32) -> Message {
+    error(
+        ErrorCode::UnknownDisplay,
+        format!("the phone has no display {display_id}"),
+    )
 }
 
 fn new_stream_id() -> u64 {
@@ -261,35 +269,13 @@ impl Agent {
             ));
         }
         let Some(display) = self.displays().displays.into_iter().find(|d| d.id == display_id) else {
-            return Err(error(
-                ErrorCode::UnknownDisplay,
-                format!("the phone has no display {display_id}"),
-            ));
+            return Err(unknown_display(display_id));
         };
         let Some(host_id) = self.inner.sessions.lock().unwrap().get(&sid).map(|s| s.host_id.clone()) else {
             return Err(error(ErrorCode::Internal, "unknown session"));
         };
         let stream = new_stream_id();
-        {
-            let mut streams = self.inner.streams.lock().unwrap();
-            if streams.values().any(|s| s.display_id == display_id) {
-                return Err(error(ErrorCode::Busy, "this display is already showing a mirror"));
-            }
-            let (cmd, cmd_rx) = mpsc::unbounded_channel();
-            streams.insert(
-                stream,
-                Stream {
-                    display_id,
-                    host_id,
-                    owner: sid,
-                    started: false,
-                    failed: None,
-                    attached: false,
-                    cmd,
-                    cmd_rx: Some(cmd_rx),
-                },
-            );
-        }
+        self.reserve_display(stream, sid, host_id, display_id)?;
         let agent = self.clone();
         Ok(async move {
             let starter = agent.clone();
@@ -322,15 +308,61 @@ impl Agent {
                     error(ErrorCode::Internal, format!("video output failed: {e}"))
                 }
                 Err(_) => {
-                    // A start that still succeeds finds no entry and stops the sink.
-                    let removed = agent.inner.streams.lock().unwrap().remove(&stream);
-                    if removed.is_some_and(|s| s.started) {
-                        agent.stop_sink(stream);
-                    }
-                    error(ErrorCode::DisplayFailed, "the phone did not show the picture in time")
+                    agent.start_timed_out(stream);
+                    error(ErrorCode::DisplayFailed, START_TOO_SLOW)
                 }
             }
         })
+    }
+
+    /// Claim the display for a new stream. The list is read again under the registry lock:
+    /// a display removed since the caller looked is either gone here, or `set_displays` has
+    /// not yet looked for its streams and will find this one.
+    // The error is the reply itself.
+    #[allow(clippy::result_large_err)]
+    fn reserve_display(&self, stream: u64, owner: u64, host_id: String, display_id: u32) -> Result<(), Message> {
+        let mut streams = self.inner.streams.lock().unwrap();
+        if !self.displays().displays.iter().any(|d| d.id == display_id) {
+            return Err(unknown_display(display_id));
+        }
+        if streams.values().any(|s| s.display_id == display_id) {
+            return Err(error(ErrorCode::Busy, "this display is already showing a mirror"));
+        }
+        let (cmd, cmd_rx) = mpsc::unbounded_channel();
+        streams.insert(
+            stream,
+            Stream {
+                display_id,
+                host_id,
+                owner,
+                started: false,
+                failed: None,
+                attached: false,
+                cmd,
+                cmd_rx: Some(cmd_rx),
+            },
+        );
+        Ok(())
+    }
+
+    /// The platform's start is still running: the display stays taken until it returns, and
+    /// [`Agent::start_sink`] then removes the picture and the entry.
+    fn start_timed_out(&self, stream: u64) {
+        let finished = {
+            let mut streams = self.inner.streams.lock().unwrap();
+            match streams.get_mut(&stream) {
+                Some(s) if !s.started => {
+                    s.failed.get_or_insert_with(|| START_TOO_SLOW.to_string());
+                    false
+                }
+                // It succeeded just now, too late.
+                Some(_) => streams.remove(&stream).is_some(),
+                None => false,
+            }
+        };
+        if finished {
+            self.stop_sink(stream);
+        }
     }
 
     /// Blocking: ask the sink, then settle the registry entry.
@@ -342,24 +374,30 @@ impl Agent {
         config: &VideoConfig,
     ) -> Result<(), String> {
         let result = sink.start(stream, display, config);
-        let mut streams = self.inner.streams.lock().unwrap();
-        let cancelled = match streams.get_mut(&stream) {
-            Some(s) => match (&result, s.failed.take()) {
-                (Ok(()), None) => {
-                    s.started = true;
-                    return Ok(());
-                }
-                (_, failed) => failed,
-            },
-            None => Some("the phone did not show the picture in time".to_string()),
-        };
-        streams.remove(&stream);
-        drop(streams);
-        match result {
-            Ok(()) => {
-                sink.stop(stream);
-                Err(cancelled.unwrap_or_else(|| "the mirror was cancelled".into()))
+        let cancelled = {
+            let mut streams = self.inner.streams.lock().unwrap();
+            match streams.get_mut(&stream) {
+                Some(s) => match (&result, s.failed.take()) {
+                    (Ok(()), None) => {
+                        s.started = true;
+                        return Ok(());
+                    }
+                    (_, failed) => {
+                        // Stays cancelled for whoever looks before the entry goes.
+                        s.failed.clone_from(&failed);
+                        failed
+                    }
+                },
+                None => Some(START_TOO_SLOW.to_string()),
             }
+        };
+        // The display stays taken until the picture is gone.
+        if result.is_ok() {
+            sink.stop(stream);
+        }
+        self.inner.streams.lock().unwrap().remove(&stream);
+        match result {
+            Ok(()) => Err(cancelled.unwrap_or_else(|| "the mirror was cancelled".into())),
             Err(why) => Err(why),
         }
     }
@@ -485,6 +523,13 @@ impl Agent {
             }
         };
         status.abort();
+        // The sink thread reports why it gave up and goes away, which closes its queue: the
+        // loop may notice the queue first. Its reason still stands.
+        while let Ok(msg) = out_rx.try_recv() {
+            if let Message::MirrorStopped { reason, message, .. } = &msg {
+                self.end_stream(stream, Some((*reason, message)));
+            }
+        }
         let _ = tx
             .send(&Frame {
                 req: 0,

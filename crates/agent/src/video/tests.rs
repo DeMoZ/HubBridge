@@ -639,3 +639,74 @@ async fn a_display_removed_while_starting_refuses_the_start() {
     let stream = *phone.sink.logs().keys().next().unwrap();
     stopped_once(&phone, stream).await;
 }
+
+/// The sink thread reports why and goes away, closing its queue: the reason must win over
+/// "the video queue closed", whichever the media session notices first.
+#[tokio::test]
+async fn the_sinks_reason_is_not_lost_when_its_queue_is_full() {
+    let phone = phone().await;
+    let who = paired(&phone, "mac").await;
+    let mut control = session(&phone, &who).await;
+    // The race is a coin toss when it is lost: repeated until a regression cannot pass.
+    for _ in 0..20 {
+        let stream = control.start_mirror(8).await;
+        let mut media = session(&phone, &who).await;
+        assert_eq!(
+            media.request(Message::MirrorAttach { stream_id: stream }).await,
+            Message::Done
+        );
+        phone.sink.set_delay(Duration::from_millis(40));
+        phone.sink.fail_next(FrameResult::Failed(
+            MirrorEnd::SurfaceLost,
+            "the picture was taken away".into(),
+        ));
+        // One in the sink, three queued and one waiting for room.
+        for seq in 1..=6 {
+            media.picture(seq, &[SPS_PPS, IDR].concat(), true, false).await;
+        }
+        assert_eq!(told(&mut control, stream, SOON).await, MirrorEnd::SurfaceLost);
+        media.closed(SOON).await;
+    }
+}
+
+#[tokio::test]
+async fn a_start_that_timed_out_keeps_the_display_until_the_sink_returns() {
+    let phone = phone().await;
+    let who = paired(&phone, "mac").await;
+    let mut control = session(&phone, &who).await;
+    let start = Message::MirrorStart {
+        display_id: 8,
+        config: CONFIG,
+    };
+    phone.sink.set_start_delay(START_TIMEOUT + Duration::from_millis(1500));
+    let late = control.request(start.clone()).await;
+    assert_eq!(code(&late), ErrorCode::DisplayFailed);
+    assert!(matches!(&late, Message::Error { message, .. } if message == "the phone did not show the picture in time"));
+    // The phone is still opening its window.
+    phone.sink.set_start_delay(Duration::ZERO);
+    assert_eq!(code(&control.request(start).await), ErrorCode::Busy);
+    // Once that start returned, its picture is removed and the display is free.
+    timeout(Duration::from_secs(5), async {
+        while !phone.sink.logs().values().any(|l| l.stops == 1) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the late start was not stopped");
+    let abandoned = *phone.sink.logs().keys().next().unwrap();
+    stopped_once(&phone, abandoned).await;
+    control.start_mirror(8).await;
+    control.never(Duration::from_millis(200), is_stopped).await;
+}
+
+/// The display can go between the first look at the list and the claim: `set_displays` has
+/// already looked for streams to end then, so the claim has to look at the list again.
+#[tokio::test]
+async fn a_display_removed_before_the_claim_is_refused() {
+    let phone = phone().await;
+    phone.agent.set_displays(list(&[9]));
+    let refused = phone.agent.reserve_display(1, 1, "mac".into(), 8).unwrap_err();
+    assert_eq!(code(&refused), ErrorCode::UnknownDisplay);
+    assert!(phone.agent.inner.streams.lock().unwrap().is_empty());
+    phone.agent.reserve_display(2, 1, "mac".into(), 9).unwrap();
+}
