@@ -30,7 +30,8 @@ use objc2_screen_capture_kit::{
 };
 use tracing::{debug, warn};
 
-use super::encode::{Encoder, Output};
+use super::encode::{Encoder, Output, failure_of};
+use crate::mirror::health::{EncoderHealth, Failure, Verdict};
 use crate::mirror::pace::{Encode, Gate};
 use crate::mirror::source::{EncodeConfig, FrameOutput, FrameSource, SourceEvent};
 
@@ -49,15 +50,69 @@ struct Handoff<T>(T);
 // SAFETY: see the type's comment; each value has one user at a time.
 unsafe impl<T> Send for Handoff<T> {}
 
+/// What the encoder's callbacks and the capture queue share about failures.
+struct Watch {
+    gate: Gate,
+    output: FrameOutput,
+    health: Mutex<EncoderHealth>,
+    /// The next picture needs a new encoder. It is made on the capture queue: an encoder
+    /// cannot be dropped from its own callback.
+    recreate: AtomicBool,
+    /// The failure was reported; nothing is encoded any more.
+    given_up: AtomicBool,
+}
+
+impl Watch {
+    fn health(&self) -> MutexGuard<'_, EncoderHealth> {
+        self.health.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A picture the gate let through gave nothing, in encoder `generation`.
+    fn failed(&self, generation: u64, keyframe: bool, failure: Failure) {
+        // Decided before the pacer can offer the picture again.
+        let verdict = self.health().failed(generation, failure);
+        match verdict {
+            Verdict::Retry => {}
+            Verdict::Recreate => self.recreate.store(true, Ordering::SeqCst),
+            Verdict::GiveUp => self.give_up("the video encoder keeps failing"),
+        }
+        self.gate.dropped(keyframe);
+    }
+
+    fn give_up(&self, why: &str) {
+        if !self.given_up.swap(true, Ordering::SeqCst) {
+            (self.output)(SourceEvent::Failed(why.to_string()));
+        }
+    }
+
+    /// A new encoder whose results come back here.
+    fn encoder(self: &Arc<Self>, config: EncodeConfig) -> Result<(Encoder, u64)> {
+        let watch = Arc::clone(self);
+        let generation = self.health().generation();
+        let encoder = Encoder::new(config, move |result| match result {
+            Output::Frame(frame) => {
+                if !frame.config {
+                    watch.health().delivered(generation);
+                }
+                (watch.output)(SourceEvent::Frame(frame));
+            }
+            Output::Dropped { forced, failure } => watch.failed(generation, forced, failure),
+        })?;
+        Ok((encoder, generation))
+    }
+}
+
 struct Pictures {
     encoder: Encoder,
+    /// The encoder's number for [`EncoderHealth`].
+    generation: u64,
+    config: EncodeConfig,
     /// The last complete picture and when it was captured.
     last: Option<Handoff<(CFRetained<CVPixelBuffer>, Instant)>>,
 }
 
 struct Shared {
-    gate: Gate,
-    output: FrameOutput,
+    watch: Arc<Watch>,
     stopped: AtomicBool,
     pictures: Mutex<Option<Pictures>>,
 }
@@ -69,13 +124,34 @@ impl Shared {
 
     /// Encode the last picture as the gate said. On the capture queue.
     fn encode(&self, pictures: &mut Pictures, encode: Encode) {
+        let mut keyframe = encode.keyframe;
+        if self.watch.given_up.load(Ordering::SeqCst) {
+            self.watch.gate.dropped(keyframe);
+            return;
+        }
+        if self.watch.recreate.swap(false, Ordering::SeqCst) {
+            warn!("the H.264 encoder keeps failing: making a new one");
+            match self.watch.encoder(pictures.config) {
+                // Its first picture has to be a keyframe, after new parameter sets.
+                Ok((encoder, generation)) => {
+                    pictures.encoder = encoder;
+                    pictures.generation = generation;
+                    keyframe = true;
+                }
+                Err(e) => {
+                    self.watch.gate.dropped(keyframe);
+                    self.watch.give_up(&format!("{e:#}"));
+                    return;
+                }
+            }
+        }
         let Some(Handoff((buffer, captured))) = &pictures.last else {
-            self.gate.dropped(encode.keyframe);
+            self.watch.gate.dropped(keyframe);
             return;
         };
-        if let Err(e) = pictures.encoder.encode(buffer, encode.keyframe, *captured) {
-            warn!("{e:#}");
-            self.gate.dropped(encode.keyframe);
+        if let Err(e) = pictures.encoder.encode(buffer, keyframe, *captured) {
+            warn!("{e}");
+            self.watch.failed(pictures.generation, keyframe, failure_of(e.status));
         }
     }
 
@@ -85,7 +161,7 @@ impl Shared {
         }
         if let Some(pictures) = self.pictures().as_mut() {
             pictures.last = Some(Handoff((buffer, Instant::now())));
-            if let Some(encode) = self.gate.captured() {
+            if let Some(encode) = self.watch.gate.captured() {
                 self.encode(pictures, encode);
             }
         }
@@ -96,7 +172,7 @@ impl Shared {
             return;
         }
         if let Some(pictures) = self.pictures().as_mut()
-            && let Some(encode) = self.gate.poll()
+            && let Some(encode) = self.watch.gate.poll()
         {
             self.encode(pictures, encode);
         }
@@ -155,7 +231,7 @@ define_class!(
         unsafe fn did_stop(&self, _stream: &SCStream, error: &NSError) {
             let shared = self.ivars();
             if !shared.stopped.load(Ordering::SeqCst) {
-                (shared.output)(SourceEvent::Failed(error.localizedDescription().to_string()));
+                (shared.watch.output)(SourceEvent::Failed(error.localizedDescription().to_string()));
             }
         }
     }
@@ -257,16 +333,23 @@ impl FrameSource for ScreenSource {
             bail!("the capture is already running");
         }
         let display = main_display()?;
-        let (encoded, drops) = (Arc::clone(&output), gate.clone());
-        let encoder = Encoder::new(config, move |result| match result {
-            Output::Frame(frame) => encoded(SourceEvent::Frame(frame)),
-            Output::Dropped { forced } => drops.dropped(forced),
-        })?;
-        let shared = Arc::new(Shared {
+        let watch = Arc::new(Watch {
             gate,
             output,
+            health: Mutex::new(EncoderHealth::new()),
+            recreate: AtomicBool::new(false),
+            given_up: AtomicBool::new(false),
+        });
+        let (encoder, generation) = watch.encoder(config)?;
+        let shared = Arc::new(Shared {
+            watch,
             stopped: AtomicBool::new(false),
-            pictures: Mutex::new(Some(Pictures { encoder, last: None })),
+            pictures: Mutex::new(Some(Pictures {
+                encoder,
+                generation,
+                config,
+                last: None,
+            })),
         });
         let delegate = StreamOutput::new(Arc::clone(&shared));
         let queue = DispatchQueue::new("com.demoz.hubbridge.capture", None);
@@ -321,7 +404,7 @@ impl FrameSource for ScreenSource {
 
     fn request_keyframe(&mut self) {
         self.post(|shared| {
-            shared.gate.want_keyframe();
+            shared.watch.gate.want_keyframe();
             shared.poll();
         });
     }

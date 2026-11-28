@@ -40,6 +40,8 @@ pub struct Pacer {
     /// A keyframe is owed: the start of the stream or a request.
     keyframe_wanted: bool,
     last_keyframe: Option<Instant>,
+    /// `last_keyframe` before the keyframe submitted last, for when the encoder drops it.
+    keyframe_before: Option<Instant>,
     skipped: u64,
     started: bool,
 }
@@ -104,6 +106,7 @@ impl Pacer {
         self.started = true;
         if encode.keyframe {
             self.keyframe_wanted = false;
+            self.keyframe_before = self.last_keyframe;
             self.last_keyframe = Some(now);
         }
     }
@@ -129,7 +132,10 @@ impl Pacer {
         self.skipped += 1;
         self.held = true;
         if keyframe {
+            // It never came out: it does not count against the limit, or the retry would
+            // be a delta frame.
             self.keyframe_wanted = true;
+            self.last_keyframe = self.keyframe_before;
         }
     }
 
@@ -392,6 +398,30 @@ mod tests {
         // The picture and the owed keyframe are tried again.
         assert_eq!(r.tick(500), KEY);
         assert_eq!(r.p.on_encoder_output(), 1);
+    }
+
+    #[test]
+    fn a_dropped_keyframe_is_retried_as_a_keyframe_at_once() {
+        // The first one.
+        let mut r = Run::new();
+        assert_eq!(r.capture(0), KEY);
+        r.p.on_encoder_dropped(true);
+        assert_eq!(r.tick(20), KEY);
+        // A later one: the one that did come out still counts against the limit.
+        let mut r = Run::new();
+        r.frame(0);
+        assert_eq!(r.request(600), KEY);
+        r.p.on_encoder_dropped(true);
+        assert_eq!(r.tick(620), KEY);
+        let seq = r.p.on_encoder_output();
+        r.ack(seq, 630);
+        assert_eq!(r.request(700), None, "a keyframe came out 80 ms ago");
+        // The periodic one stays due.
+        let mut r = Run::new();
+        r.frame(0);
+        assert_eq!(r.capture(10_000), KEY);
+        r.p.on_encoder_dropped(true);
+        assert_eq!(r.tick(10_020), KEY);
     }
 
     #[test]

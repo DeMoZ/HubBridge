@@ -21,7 +21,7 @@ pub struct Snapshot {
     /// Capture to the phone decoder's acknowledgement, over the last second; none without acks.
     pub delay_ms: Option<f64>,
     pub delay_max_ms: Option<f64>,
-    /// Round trip of the video session (measured while the screen is still).
+    /// Round trip of the video session (the latest ping, also while frames flow).
     pub rtt_ms: Option<f64>,
     /// Frames the phone decoded per second.
     pub phone_fps: Option<f64>,

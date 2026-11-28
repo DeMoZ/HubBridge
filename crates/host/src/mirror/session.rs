@@ -19,7 +19,8 @@ use crate::store::Store;
 
 /// The agent sends a status every second: this much silence means the link is gone.
 pub const MEDIA_SILENCE: Duration = Duration::from_secs(5);
-/// Ping the video session after this long without a frame, so a still screen is not idle.
+/// Ping the video session this often, whether frames flow or not: the round trip of the
+/// readout, and what keeps a still screen from being idle.
 pub const KEEPALIVE: Duration = Duration::from_secs(2);
 /// After the video session closed, how long the phone's reason may still be on its way.
 const REASON_WAIT: Duration = Duration::from_secs(1);
@@ -28,6 +29,8 @@ const KICK_EVERY: Duration = Duration::from_millis(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub const CONNECTION_LOST: &str = "the connection to the phone was lost";
+/// The video session closed and no reason came on the control session.
+pub const VIDEO_CLOSED: &str = "the video connection closed and the phone did not say why";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MirrorOptions {
@@ -67,7 +70,7 @@ impl Ending {
     pub fn from_phone(reason: MirrorEnd, message: &str) -> Ending {
         Ending::because(match reason {
             MirrorEnd::DisplayRemoved => "the monitor was disconnected".to_string(),
-            MirrorEnd::VideoSessionLost => "the video connection was lost".to_string(),
+            MirrorEnd::VideoSessionLost => "the phone lost the video connection".to_string(),
             MirrorEnd::NotAttached => "the video connection was not opened in time".to_string(),
             MirrorEnd::DecoderFailed => "the phone's video decoder failed".to_string(),
             MirrorEnd::DecoderStalled => "the phone's video decoder stopped".to_string(),
@@ -355,9 +358,8 @@ impl Run {
         );
         let mut kick = tokio::time::interval(KICK_EVERY);
         kick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_frame = Instant::now();
         let mut last_heard = Instant::now();
-        let mut last_ping = Instant::now();
+        let mut last_ping: Option<Instant> = None;
         let mut ping_seq = 0u32;
         let mut pending_ping = None;
         // Set when the video session closed: the reason may follow on the control session.
@@ -372,7 +374,7 @@ impl Run {
                 },
                 _ = control_closed.as_mut() => return Ending::because(CONNECTION_LOST),
                 _ = tokio::time::sleep_until(gone_deadline), if media_gone.is_some() => {
-                    return Ending::because("the video connection was lost");
+                    return Ending::because(VIDEO_CLOSED);
                 }
                 event = media_events.recv(), if media_gone.is_none() => match event {
                     Some(ClientEvent::Message(msg)) => {
@@ -403,7 +405,6 @@ impl Run {
                             self.readout.on_sent(seq, frame.captured, frame.data.len(), frame.keyframe);
                             seq
                         };
-                        last_frame = Instant::now();
                         let video = VideoFrame {
                             seq,
                             pts_us: frame.captured.saturating_duration_since(began).as_micros() as u64,
@@ -429,11 +430,11 @@ impl Run {
                     if last_heard.elapsed() >= MEDIA_SILENCE {
                         return Ending::because(CONNECTION_LOST);
                     }
-                    let quiet = last_frame.elapsed() >= KEEPALIVE && last_ping.elapsed() >= KEEPALIVE;
-                    if quiet && pending_ping.is_none() && media_gone.is_none() {
+                    let due = last_ping.is_none_or(|at| at.elapsed() >= KEEPALIVE);
+                    if due && pending_ping.is_none() && media_gone.is_none() {
                         ping_seq += 1;
-                        last_ping = Instant::now();
-                        let sent = last_ping;
+                        let sent = Instant::now();
+                        last_ping = Some(sent);
                         if let Ok(pending) = self.media.submit(Message::Ping { seq: ping_seq, sent_us: 0 }).await {
                             pending_ping = Some(Box::pin(async move { (sent, pending.wait(MEDIA_SILENCE).await) }));
                         }

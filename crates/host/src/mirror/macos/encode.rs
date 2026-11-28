@@ -22,12 +22,13 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_ExpectedFrameRate,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
-    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTInvalidSessionErr, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
     kVTProfileLevel_H264_High_AutoLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
 };
 use tracing::{info, warn};
 
 use crate::mirror::annexb;
+use crate::mirror::health::Failure;
 use crate::mirror::source::{EncodeConfig, EncodedFrame};
 
 /// What came out of the encoder.
@@ -36,7 +37,23 @@ pub enum Output {
     /// A config frame precedes the first keyframe and every change of the parameter sets.
     Frame(EncodedFrame),
     /// A submitted picture produced nothing; `forced` says whether a keyframe was asked for.
-    Dropped { forced: bool },
+    Dropped { forced: bool, failure: Failure },
+}
+
+/// How a VideoToolbox status other than success counts.
+pub fn failure_of(status: i32) -> Failure {
+    if status == kVTInvalidSessionErr {
+        Failure::InvalidSession
+    } else {
+        Failure::Error
+    }
+}
+
+/// A picture the encoder would not take.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("cannot encode a picture (VideoToolbox error {status})")]
+pub struct Refused {
+    pub status: i32,
 }
 
 type Handler = Box<dyn Fn(Output) + Send + Sync>;
@@ -197,7 +214,7 @@ impl Encoder {
     }
 
     /// Submit a picture. On an error no output follows for it.
-    pub fn encode(&mut self, picture: &CVPixelBuffer, force_keyframe: bool, captured: Instant) -> Result<()> {
+    pub fn encode(&mut self, picture: &CVPixelBuffer, force_keyframe: bool, captured: Instant) -> Result<(), Refused> {
         // Strictly increasing, also when the same picture is encoded again.
         let pts = (self.began.elapsed().as_micros() as i64).max(self.last_pts + 1);
         self.last_pts = pts;
@@ -226,7 +243,7 @@ impl Encoder {
         if status != 0 {
             // SAFETY: a refused picture never reaches the callback.
             drop(unsafe { Box::from_raw(info) });
-            bail!("cannot encode a picture (VideoToolbox error {status})");
+            return Err(Refused { status });
         }
         Ok(())
     }
@@ -368,7 +385,17 @@ unsafe extern "C-unwind" fn output_callback(
         if status != 0 {
             warn!(status, "the encoder failed on a picture");
         }
-        (context.handler)(Output::Dropped { forced: picture.forced });
+        let failure = if status != 0 {
+            failure_of(status)
+        } else if flags.contains(VTEncodeInfoFlags::FrameDropped) {
+            Failure::Dropped
+        } else {
+            Failure::Error
+        };
+        (context.handler)(Output::Dropped {
+            forced: picture.forced,
+            failure,
+        });
     }
 }
 

@@ -233,6 +233,8 @@ async fn start_frames_acks_stats_stop() {
     assert!(stats.fps > 15.0 && stats.kbps > 100.0, "{stats}");
     assert!(stats.delay_ms.is_some_and(|d| d < 400.0), "{stats}");
     assert!(stats.phone_fps.is_some_and(|f| f > 15.0), "{stats}");
+    // Measured while frames flow, not only on a still screen.
+    assert!(stats.rtt_ms.is_some(), "{stats}");
     assert!(stats.keyframes >= 1);
     assert_eq!(stats.phone_bad, 0);
 
@@ -417,12 +419,35 @@ async fn a_lost_video_session_reports_the_phone_reason() {
     // Connection 0 is the control session, 1 the video session.
     proxy.set(1, Link::Dead);
     let ending = ended(&m, Duration::from_secs(3)).await;
-    assert_eq!(ending.reason, "the video connection was lost");
+    assert_eq!(ending.reason, "the phone lost the video connection");
     wait_until(Duration::from_secs(1), "the picture is removed", || {
         phone.sink.fake.log(stream).unwrap().stops == 1
     })
     .await;
     control.ping(1).await.expect("the control session stays up");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_video_session_without_the_phone_reason_says_so() {
+    let phone = phone().await;
+    let proxy = Proxy::start(phone.addr).await;
+    let (control, mut store) = paired(&phone, proxy.addr).await;
+    let source = SyntheticSource::new(1920, 1080);
+    let controls = source.controls();
+    // Nobody passes the control session's events on, as when the phone's reason is lost.
+    let handle = Arc::new(mirror_with(&control, &mut store, Box::new(source)).await.unwrap());
+    let stream = handle.stream_id();
+    let m = Mirror {
+        handle,
+        source: controls,
+    };
+    wait_until(Duration::from_secs(2), "frames", || decoded(&phone, stream) > 3).await;
+    proxy.set(1, Link::Dead);
+    let ending = ended(&m, Duration::from_secs(3)).await;
+    assert_eq!(
+        ending.reason,
+        "the video connection closed and the phone did not say why"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
