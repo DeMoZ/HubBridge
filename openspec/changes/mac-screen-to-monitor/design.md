@@ -415,7 +415,8 @@ all of this; Developer ID signing (roadmap) is the real fix.
 
 - Whether a locked phone whose screen is on shows the picture or the lock screen on the monitor (not tested by the
   spike).
-- Which profile VideoToolbox accepts in low-latency mode on this Mac (D4 handles both).
+- Which profile VideoToolbox accepts in low-latency mode on this Mac (D4 handles both): answered 2026-11-28,
+  `ConstrainedHigh_AutoLevel` is accepted (encoder test, 1108×720, 60 pictures, none dropped).
 
 ## Spike results
 

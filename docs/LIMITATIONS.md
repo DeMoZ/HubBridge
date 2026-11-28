@@ -142,7 +142,7 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 | Keyboard / mouse | `SendInput`, no driver | `CGEvent`, Accessibility permission |
 | Generic HID / gamepad | VHF (KMDF driver, signing) / ViGEm-style bus driver | HIDDriverKit dext: DriverKit entitlements from Apple + user approval in System Settings |
 | Virtual monitor | **IddCx** UMDF driver: test-signing for development, attestation signing for distribution; signed open-source options exist (Virtual Display Driver, Parsec VDD) | `CGVirtualDisplay` — **private API** (no App Store, may break with OS updates); no public alternative |
-| Screen capture | Windows.Graphics.Capture / Desktop Duplication, no driver | ScreenCaptureKit, Screen Recording permission |
+| Screen capture | Windows.Graphics.Capture / Desktop Duplication, no driver (not built: mirroring needs macOS for now) | ScreenCaptureKit, "Screen & System Audio Recording" permission (§5) |
 | Webcam from the phone | **Windows 11 `MFCreateVirtualCamera`**, no driver (Windows 10: DirectShow filter only) | CoreMediaIO **Camera Extension**: system extension, Developer ID + notarization, user approval |
 
 ### Serial front ends: what a PTY can and cannot do
@@ -189,6 +189,18 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
   same way.
 - **macOS may ask for Local Network access again after an update**: an ad-hoc signed app has no
   stable signing identity. Not yet checked with a real update.
+- **Screen mirroring needs the "Screen & System Audio Recording" permission** (System
+  Settings → Privacy & Security). What to expect:
+  - HubBridge asks macOS once per run, the first time you press Mirror; macOS shows its own
+    prompt only the first time ever.
+  - After allowing it, **quit and reopen** the app: the running one usually still sees the old
+    answer (macOS offers "Quit & Reopen").
+  - The app is signed ad hoc, so it has no stable identity: **every update or new build loses
+    the permission** and must be allowed again. An old HubBridge entry in the list may have to
+    be removed with "−" first. Developer ID signing (roadmap) is the real fix.
+  - macOS 15 and later ask again about once a month.
+  - For development, a binary started from Terminal or Orca is covered by **that app's**
+    permission, not by HubBridge's.
 - **adb after quitting the app:** an adb server started by the packaged app may lose local
   network access once the app quits (ADB over Wi-Fi stops working until the adb server is
   restarted, for example with `adb kill-server`). Spawning it "disclaimed" is on the roadmap.

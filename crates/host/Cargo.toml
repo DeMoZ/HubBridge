@@ -37,3 +37,15 @@ hubbridge-agent = { workspace = true }
 # Pseudo-terminal front end (`serial::pty`): openpt/grantpt/unlockpt, termios of the slave.
 rustix = { version = "1", features = ["pty", "termios", "fs", "std"] }
 libc = "0.2"
+# Screen mirroring: ScreenCaptureKit capture and VideoToolbox H.264 (the objc2 family the
+# window already uses through tao and wry). Only the headers used.
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSString"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGDisplayStream", "CGWindow"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "dispatch2", "SCError", "SCShareableContent", "SCStream", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "bitflags", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
