@@ -88,8 +88,11 @@ in `watch`.
 
 - New `Message` variants are only appended (postcard encodes the variant index).
 - Incompatible changes bump `PROTO_VERSION`; the agent answers `VersionMismatch`.
-- Step 3 adds `OpenVideo`/`VideoConfig` on the control stream and a separate media
-  connection.
+- The displays and mirroring messages (step 3a, below) are appended variants: hellos, key
+  derivation and records are unchanged, so the protocol stays **v1**.
+- A peer that receives a variant it does not know fails to decode the frame and **its session
+  ends**. New messages are therefore sent only to peers that are known to understand them
+  (see "Compatibility").
 
 ## USB data (step 2)
 
@@ -111,3 +114,62 @@ in `watch`.
   phase in flight) and they complete in order. The agent stops reading new requests while
   256 are pending in a session.
 - Event `DeviceClosed {id, reason}` when the agent closes an open device (unplugged).
+
+## Displays and mirroring (step 3a)
+
+The host shows a video stream on a display attached to the phone. Types are in
+`crates/proto/src/video.rs`; these structs are final once released.
+
+| Message | Direction, session | Meaning |
+|---|---|---|
+| `GetDisplays` → `Displays(DisplayList)` | host → agent, control | the list; also opts this session in to `DisplaysChanged` |
+| `DisplaysChanged(DisplayList)` | agent event, control, opted-in sessions only | the full list after any change |
+| `MirrorStart {display_id, config: VideoConfig}` → `MirrorStarted {stream_id}` | host → agent, control | the phone shows the surface and prepares the decoder before answering (at most 5 s) |
+| `MirrorAttach {stream_id}` → `Done` | host → agent, first request of the media session | |
+| `MirrorStop {stream_id}` → `Done` | host → agent, control | the phone removes the picture and closes the media session |
+| `MirrorStopped {stream_id, reason, message}` | agent event, only to the control session that started the stream | the phone ended it; `reason`: `DisplayRemoved`, `VideoSessionLost`, `NotAttached`, `DecoderFailed`, `DecoderStalled`, `SurfaceLost`, `AgentStopped` |
+| `VideoFrame {seq, pts_us, keyframe, config, data}` | host → agent, media, `req = 0` | one Annex B access unit; `config` = SPS and PPS only |
+| `VideoAck {seq}` | agent → host, media, `req = 0` | the decoder input took the frame |
+| `VideoStatus {decoded, dropped, bad, decode_us, phone_locked}` | agent → host, media, `req = 0`, every second | counters since the stream started |
+| `VideoNeedKeyframe` | agent → host, media, `req = 0` | send a keyframe |
+
+- `DisplayList {displays, desktop_mode}`; `desktop_mode` is Samsung DeX.
+  `DisplayInfo {id, name, width, height, refresh_mhz, modes[{width, height, refresh_mhz}],
+  presentation, secure}`. A display id is valid only until the list changes (a replug or DeX
+  can bring the same monitor back under another id).
+- `VideoConfig {codec: H264, width, height, fps, bitrate_kbps}`.
+- `Error` codes of a refused start: `UnknownDisplay` (no such display), `Busy` (it already
+  shows a mirror), `Unsupported` (no video output, another codec, zero size, fps outside
+  1–60), `DisplayFailed` (the phone cannot show a picture there now; the message says why and
+  what to do, e.g. turn Samsung DeX off). New codes answer new requests only.
+
+### The media session
+
+Video does not share a connection with control traffic. The host opens a **second TCP
+connection** to the same address (Wi-Fi, or the same `adb forward` port) and runs the
+ordinary **resume** handshake with the same key. Its first request is `MirrorAttach`. The
+agent accepts it only if the stream exists, is not attached yet and was started by a control
+session of the **same host id**. From then on this is a media session: no device or display
+events; the only messages are `VideoFrame`, `VideoAck`, `VideoStatus`, `VideoNeedKeyframe`,
+`Ping`/`Pong` and `Bye`. Any other message ends it. `MirrorAttach` on a session that already
+sent another request is answered `Unsupported`.
+
+- **Acknowledgement window:** the host keeps at most two frames in its encoder or sent and not
+  yet acknowledged, and skips captured frames (before encoding) while the window is full.
+  The agent passes frames to the decoder one at a time and never drops one; a decoder that
+  takes nothing for 2 s ends the mirror (`DecoderStalled`).
+- **Keyframes:** the stream starts with a config frame and a keyframe; the host sends a new
+  keyframe when asked and at least every 10 s, at most two forced ones per second.
+- **Still screen:** no frames are sent. The host sends `Ping` after 2 s without a frame, so
+  the agent's 20 s idle timeout never ends a quiet stream; the `Pong` gives the media RTT.
+- A stream that is not attached within 5 s ends (`NotAttached`). When the control session
+  ends, its streams end without an event.
+
+### Compatibility
+
+- A host sends `GetDisplays` and the mirror messages only when `AgentInfo.app_version` is at
+  least **0.2.0** (parsed leniently: leading digits of each part; unparsable counts as old).
+- The agent sends `DisplaysChanged` only to sessions that sent `GetDisplays`, and
+  `MirrorStopped` only to the session that started the stream, so an older host receives
+  nothing new.
+

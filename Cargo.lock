@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-agent-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-android"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hubbridge-host",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-link"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "hubbridge-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "serde",

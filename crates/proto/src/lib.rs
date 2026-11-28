@@ -11,11 +11,17 @@
 
 pub mod descriptors;
 pub mod fixtures;
+pub mod h264;
 pub mod usb;
+pub mod video;
 
 use serde::{Deserialize, Serialize};
 
 pub use usb::{ConfigInfo, EndpointInfo, InterfaceInfo, TransferType, UsbDeviceInfo};
+pub use video::{
+    DisplayInfo, DisplayList, DisplayMode, MIRROR_MIN_APP_VERSION, MirrorEnd, VideoCodec, VideoConfig, VideoFrame,
+    VideoStatus, app_version_at_least,
+};
 
 /// Protocol version. Bumped on any incompatible change of the hello or the message set.
 pub const PROTO_VERSION: u16 = 1;
@@ -208,6 +214,45 @@ pub enum Message {
         id: u32,
         reason: String,
     },
+
+    // --- Step 3a: phone displays and mirroring (only sent to peers that know them) ------
+    /// List the phone's presentation displays; also opts this session in to
+    /// [`Message::DisplaysChanged`].
+    GetDisplays,
+    Displays(DisplayList),
+    /// Event, only for sessions that sent [`Message::GetDisplays`]: the full list after a change.
+    DisplaysChanged(DisplayList),
+    /// Show a video stream on a display; the phone prepares the surface and the decoder first.
+    MirrorStart {
+        display_id: u32,
+        config: VideoConfig,
+    },
+    MirrorStarted {
+        stream_id: u64,
+    },
+    /// First request of the media session of a stream.
+    MirrorAttach {
+        stream_id: u64,
+    },
+    MirrorStop {
+        stream_id: u64,
+    },
+    /// Event, only to the control session that started the stream: the phone ended it.
+    MirrorStopped {
+        stream_id: u64,
+        reason: MirrorEnd,
+        message: String,
+    },
+    /// Media session, host → agent, `req = 0`.
+    VideoFrame(VideoFrame),
+    /// Media session: the decoder input took frame `seq`.
+    VideoAck {
+        seq: u64,
+    },
+    /// Media session, every second.
+    VideoStatus(VideoStatus),
+    /// Media session: send a keyframe.
+    VideoNeedKeyframe,
 }
 
 /// SETUP packet of a control transfer.
@@ -267,6 +312,10 @@ pub enum ErrorCode {
     NotOpen,
     /// The OS refused a USB operation (claim, set alternate, reset...).
     UsbFailed,
+    /// The phone has no such display.
+    UnknownDisplay,
+    /// The phone cannot show a picture on this display now; the message says why and what to do.
+    DisplayFailed,
 }
 
 /// Static facts about the agent.
@@ -309,6 +358,100 @@ mod tests {
         let bytes = encode(&frame).unwrap();
         let back: Frame = decode(&bytes).unwrap();
         assert_eq!(frame, back);
+    }
+
+    fn round_trip(msg: Message) {
+        let frame = Frame { req: 3, msg };
+        let back: Frame = decode(&encode(&frame).unwrap()).unwrap();
+        assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn mirror_messages_round_trip() {
+        let list = DisplayList {
+            displays: vec![DisplayInfo {
+                id: 10,
+                name: "HDMI Screen".into(),
+                width: 2560,
+                height: 1600,
+                refresh_mhz: 60_011,
+                modes: vec![DisplayMode {
+                    width: 1280,
+                    height: 720,
+                    refresh_mhz: 60_000,
+                }],
+                presentation: true,
+                secure: true,
+            }],
+            desktop_mode: true,
+        };
+        let config = VideoConfig {
+            codec: VideoCodec::H264,
+            width: 1108,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let status = VideoStatus {
+            decoded: 90,
+            dropped: 1,
+            bad: 2,
+            decode_us: 4200,
+            phone_locked: true,
+        };
+        for msg in [
+            Message::GetDisplays,
+            Message::Displays(list.clone()),
+            Message::DisplaysChanged(list),
+            Message::MirrorStart { display_id: 10, config },
+            Message::MirrorStarted { stream_id: u64::MAX },
+            Message::MirrorAttach { stream_id: 1 },
+            Message::MirrorStop { stream_id: 1 },
+            Message::MirrorStopped {
+                stream_id: 1,
+                reason: MirrorEnd::DecoderStalled,
+                message: "stalled".into(),
+            },
+            Message::VideoFrame(VideoFrame {
+                seq: 5,
+                pts_us: 166_000,
+                keyframe: true,
+                config: false,
+                data: vec![0, 0, 0, 1, 0x65, 9],
+            }),
+            Message::VideoAck { seq: 5 },
+            Message::VideoStatus(status),
+            Message::VideoNeedKeyframe,
+            Message::Error {
+                code: ErrorCode::UnknownDisplay,
+                message: "x".into(),
+            },
+            Message::Error {
+                code: ErrorCode::DisplayFailed,
+                message: "x".into(),
+            },
+        ] {
+            round_trip(msg);
+        }
+    }
+
+    /// Variant indices are the wire format: the old ones must never move.
+    #[test]
+    fn old_variants_encode_as_before() {
+        let bytes = |msg| encode(&Frame { req: 7, msg }).unwrap();
+        assert_eq!(bytes(Message::Ping { seq: 1, sent_us: 300 }), [7, 0, 1, 0xac, 0x02]);
+        assert_eq!(bytes(Message::DeviceList { devices: vec![] }), [7, 5, 0]);
+        assert_eq!(
+            bytes(Message::DeviceClosed {
+                id: 2,
+                reason: "x".into()
+            }),
+            [7, 24, 2, 1, b'x']
+        );
+        // The first new variant follows the last old one.
+        assert_eq!(bytes(Message::GetDisplays), [7, 25]);
+        assert_eq!(encode(&ErrorCode::UsbFailed).unwrap(), [6]);
+        assert_eq!(encode(&ErrorCode::UnknownDisplay).unwrap(), [7]);
     }
 
     #[test]
