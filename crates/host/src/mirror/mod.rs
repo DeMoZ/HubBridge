@@ -3,10 +3,12 @@
 //! The pure parts: [`fit`] (the stream size), [`annexb`] (encoder output to the wire format),
 //! [`pace`] (which captured frames are encoded) and [`stats`] (the once-a-second readout).
 //! [`session`] runs a mirror: it takes encoded frames from a [`source::FrameSource`] and sends
-//! them over a video session of its own. Sources: the screen (macOS), [`synthetic`] (fake
-//! frames for tests).
+//! them over a video session of its own. Sources: the screen (macOS), [`test_pattern`] (a
+//! built-in clip) and [`synthetic`] (fake frames for tests). [`cli`] is behind the
+//! `hubbridge displays` and `hubbridge mirror` commands.
 
 pub mod annexb;
+pub mod cli;
 pub mod fit;
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -15,6 +17,7 @@ pub mod session;
 pub mod source;
 pub mod stats;
 pub mod synthetic;
+pub mod test_pattern;
 
 pub use session::{Ending, MirrorHandle, MirrorOptions, MirrorSession};
 pub use source::{EncodeConfig, EncodedFrame, FrameOutput, FrameSource, SourceEvent};

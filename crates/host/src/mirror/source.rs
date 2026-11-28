@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+use super::fit::fit;
 use super::pace::Gate;
 
 /// What the source has to encode.
@@ -46,6 +47,13 @@ pub type FrameOutput = Arc<dyn Fn(SourceEvent) + Send + Sync>;
 pub trait FrameSource: Send {
     /// Size of the captured picture in pixels.
     fn native_size(&mut self) -> Result<(u32, u32)>;
+
+    /// The stream size for a display of this size: the picture fitted to it ([`fit`]). A
+    /// source of already encoded pictures answers with their own size.
+    fn stream_size(&mut self, display_width: u32, display_height: u32) -> Result<(u32, u32)> {
+        let (width, height) = self.native_size()?;
+        Ok(fit(width, height, display_width, display_height))
+    }
 
     /// Start delivering frames of `config`'s size. May block.
     fn start(&mut self, config: EncodeConfig, gate: Gate, output: FrameOutput) -> Result<()>;

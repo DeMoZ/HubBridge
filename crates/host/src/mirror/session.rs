@@ -10,7 +10,7 @@ use hubbridge_proto::{
 };
 use tokio::sync::{mpsc, watch};
 
-use super::fit::{fit, preset_bitrate_kbps};
+use super::fit::preset_bitrate_kbps;
 use super::pace::Gate;
 use super::source::{EncodeConfig, FrameSource, SourceEvent};
 use super::stats::{Snapshot, Stats};
@@ -209,11 +209,10 @@ impl MirrorSession {
             .into_iter()
             .find(|d| d.id == display_id)
             .with_context(|| format!("the phone has no display {display_id}"))?;
-        let (native_w, native_h) = source.native_size()?;
-        let (width, height) = fit(native_w, native_h, display.width, display.height);
+        let (width, height) = source.stream_size(display.width, display.height)?;
         if width == 0 || height == 0 {
             bail!(
-                "cannot fit a {native_w}x{native_h} picture onto a {}x{} display",
+                "cannot fit the picture onto a {}x{} display",
                 display.width,
                 display.height
             );

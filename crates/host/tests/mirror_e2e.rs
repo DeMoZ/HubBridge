@@ -11,8 +11,10 @@ use anyhow::Result;
 use hubbridge_agent::fake::FakeVideoSink;
 use hubbridge_agent::video::{FrameResult, SinkStats, VideoSink};
 use hubbridge_agent::{Agent, AgentConfig};
+use hubbridge_host::mirror::cli;
 use hubbridge_host::mirror::pace::Gate;
 use hubbridge_host::mirror::synthetic::{Controls, SyntheticSource};
+use hubbridge_host::mirror::test_pattern::TestPattern;
 use hubbridge_host::mirror::{
     EncodeConfig, Ending, FrameOutput, FrameSource, MirrorHandle, MirrorOptions, MirrorSession,
 };
@@ -657,4 +659,162 @@ async fn events_keep_their_order_and_displays_are_listed() {
         }
     }
     assert_eq!(acked, (1..=20).collect::<Vec<_>>());
+}
+
+// --- the CLI commands ---------------------------------------------------------------------
+
+async fn display_listing(phone: &Phone, json: bool) -> (Result<()>, String, Arc<Client>) {
+    let (control, _store) = paired(phone, phone.addr).await;
+    let mut out = Vec::new();
+    let result = cli::displays(&control, json, &mut out).await;
+    (result, String::from_utf8(out).unwrap(), control)
+}
+
+#[tokio::test]
+async fn cli_displays_prints_one_line_per_display() {
+    let phone = phone().await;
+    let (result, text, _) = display_listing(&phone, false).await;
+    result.unwrap();
+    assert_eq!(text, "[8] HDMI Screen  1280×720  60 Hz  presentation  DeX off\n");
+    let (result, json, _) = display_listing(&phone, true).await;
+    result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["desktop_mode"], false);
+    let d = &json["displays"][0];
+    assert_eq!((&d["id"], &d["name"]), (&8.into(), &"HDMI Screen".into()));
+    assert_eq!(
+        (&d["width"], &d["height"], &d["refresh_mhz"]),
+        (&1280.into(), &720.into(), &60_000.into())
+    );
+    assert_eq!((&d["presentation"], &d["secure"]), (&true.into(), &false.into()));
+
+    phone.agent.set_displays(displays(&[]));
+    let (result, text, _) = display_listing(&phone, false).await;
+    result.expect("an empty list is not an error");
+    assert!(text.contains("no displays"), "{text}");
+
+    let mut dex = displays(&[8]);
+    dex.desktop_mode = true;
+    phone.agent.set_displays(dex);
+    let (_, text, _) = display_listing(&phone, false).await;
+    assert!(text.contains("DeX on") && text.contains("Turn DeX off"), "{text}");
+}
+
+#[tokio::test]
+async fn cli_displays_tells_to_update_an_old_app() {
+    let phone = phone_with_version("0.1.0").await;
+    let (result, text, control) = display_listing(&phone, false).await;
+    let why = result.unwrap_err().to_string();
+    assert!(why.starts_with("update the phone app"), "{why}");
+    assert!(text.is_empty());
+    let mut events = control.take_events().unwrap();
+    phone.agent.set_displays(displays(&[9]));
+    assert!(
+        timeout(Duration::from_millis(500), events.recv()).await.is_err(),
+        "no display request reached the agent"
+    );
+    control.ping(1).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_mirror_runs_for_the_given_time_and_stops_cleanly() {
+    let phone = phone().await;
+    let (control, mut store) = paired(&phone, phone.addr).await;
+    let mut out = Vec::new();
+    cli::mirror(
+        control,
+        &mut store,
+        8,
+        MirrorOptions::default(),
+        Box::new(SyntheticSource::new(1920, 1080)),
+        Some(2),
+        std::future::pending(),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("as 1280×720 at 30 fps"), "{text}");
+    assert!(text.contains("H.264") && text.contains("kbit/s"), "{text}");
+    assert!(text.ends_with("Mirroring stopped.\n"), "{text}");
+    let logs = phone.sink.fake.logs();
+    let log = logs.values().next().unwrap();
+    assert!(log.decoded > 30 && log.bad == 0, "{log:?}");
+    wait_until(Duration::from_secs(2), "the picture is removed", || {
+        phone.sink.fake.logs().values().next().unwrap().stops == 1
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_mirror_ends_with_the_reason_as_an_error() {
+    let phone = phone().await;
+    let (control, mut store) = paired(&phone, phone.addr).await;
+    let agent = phone.agent.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        agent.set_displays(displays(&[]));
+    });
+    let mut out = Vec::new();
+    let result = cli::mirror(
+        control,
+        &mut store,
+        8,
+        MirrorOptions::default(),
+        Box::new(SyntheticSource::new(1280, 720)),
+        Some(20),
+        std::future::pending(),
+        &mut out,
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Mirroring stopped: the monitor was disconnected"
+    );
+}
+
+/// The built-in clip through the whole path: it keeps its own size.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_test_pattern_reaches_the_phone() {
+    let phone = phone().await;
+    let (control, mut store) = paired(&phone, phone.addr).await;
+    let handle = mirror_with(&control, &mut store, Box::new(TestPattern::new()))
+        .await
+        .unwrap();
+    assert_eq!((handle.config().width, handle.config().height), (640, 360));
+    let stream = handle.stream_id();
+    wait_until(Duration::from_secs(5), "more than one loop", || {
+        decoded(&phone, stream) > 70
+    })
+    .await;
+    handle.stop().await;
+    let log = phone.sink.fake.log(stream).unwrap();
+    assert_eq!(log.bad, 0);
+    assert!(log.keyframes >= 2);
+}
+
+#[tokio::test]
+async fn cli_records_into_a_file() {
+    let dir = temp_dir("record");
+    let path = dir.join("clip.h264");
+    let mut out = Vec::new();
+    cli::record(
+        Box::new(SyntheticSource::new(3024, 1964)),
+        &path,
+        (1280, 720),
+        MirrorOptions::default(),
+        Some(2),
+        std::future::pending(),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with("Recording 1108x720"), "{text}");
+    let data = std::fs::read(&path).unwrap();
+    let unit = h264::validate(&data).unwrap();
+    // The config frame, then the keyframe with its parameter sets.
+    assert_eq!(&unit.types[..5], [7, 8, 7, 8, 5]);
+    assert!(unit.types.len() > 30);
+    let _ = std::fs::remove_dir_all(dir);
 }

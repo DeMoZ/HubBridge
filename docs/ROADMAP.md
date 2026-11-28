@@ -62,7 +62,7 @@ OpenSpec change `mac-screen-to-monitor`.
 - [x] Media connection: a second TCP session now (Wi-Fi and ADB); QUIC datagrams are a later
       option. Back-pressure window, keyframe requests, stats (FPS, bitrate, delay, phone
       decoder); tested without a phone.
-- [ ] macOS: ScreenCaptureKit capture, VideoToolbox low-latency H.264, Screen Recording
+- [x] macOS: ScreenCaptureKit capture, VideoToolbox low-latency H.264, Screen Recording
       permission; `hubbridge displays` and `hubbridge mirror`.
 - [ ] Android: display list, `MediaCodec` low-latency decoding onto the monitor.
 - [ ] Desktop window: "Phone displays" panel with Mirror/Stop.

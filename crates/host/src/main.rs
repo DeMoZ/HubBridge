@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use hubbridge_host::mirror::{self, FrameSource, MirrorOptions, synthetic::SyntheticSource, test_pattern::TestPattern};
 use hubbridge_host::serial::bench::{self, EchoOptions, RequestOptions};
 use hubbridge_host::serial::bridge::{BridgeOptions, SerialBridge};
 use hubbridge_host::serial::{Flow, Line, Parity, PortOptions, SerialConfig, SerialPort, StopBits, tcp};
@@ -94,10 +95,98 @@ enum Cmd {
     /// on this computer: a PTY and/or a TCP port, or measure it with --bench-echo /
     /// --bench-request.
     Serial(SerialArgs),
+    /// List the displays attached to the phone (monitors on its USB-C port or hub).
+    Displays {
+        target: Option<String>,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show this computer's screen on a display of the phone (macOS), until Ctrl-C.
+    Mirror(MirrorArgs),
     /// List paired agents.
     Agents,
     /// Forget a paired agent (also remove this computer in the phone app).
     Forget { agent: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SourceArg {
+    /// The main display of this computer (macOS).
+    Screen,
+    /// A built-in 640×360 test clip: checks the phone's decoder without any capture.
+    TestPattern,
+    /// Fake frames no real decoder can show: for the simulator.
+    Synthetic,
+}
+
+#[derive(Args)]
+struct MirrorArgs {
+    target: Option<String>,
+    /// Display id from `hubbridge displays`.
+    #[arg(long, required_unless_present = "to_file")]
+    display: Option<u32>,
+    /// Frames per second: 30 or 60.
+    #[arg(long, default_value_t = 30, value_parser = parse_fps)]
+    fps: u32,
+    /// kbit/s (default: by the stream size and frame rate).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=100_000))]
+    bitrate: Option<u32>,
+    #[arg(long, value_enum, default_value = "screen")]
+    source: SourceArg,
+    /// Encode into this file (H.264 Annex B) on this computer; no phone is involved.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["target", "display"])]
+    to_file: Option<std::path::PathBuf>,
+    /// With --to-file: the size the picture is fitted to.
+    #[arg(long, value_name = "WxH", default_value = "1280x720", value_parser = parse_size)]
+    size: (u32, u32),
+    /// Stop after this many seconds.
+    #[arg(long)]
+    seconds: Option<u64>,
+}
+
+fn parse_fps(s: &str) -> Result<u32, String> {
+    match s {
+        "30" => Ok(30),
+        "60" => Ok(60),
+        other => Err(format!("--fps is 30 or 60, not '{other}'")),
+    }
+}
+
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    s.split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|(w, h)| *w >= 2 && *h >= 2)
+        .ok_or_else(|| format!("--size is WIDTHxHEIGHT, not '{s}'"))
+}
+
+fn frame_source(source: SourceArg) -> Result<Box<dyn FrameSource>> {
+    Ok(match source {
+        SourceArg::Screen => mirror::screen_source()?,
+        SourceArg::TestPattern => Box::new(TestPattern::new()),
+        SourceArg::Synthetic => Box::new(SyntheticSource::new(1920, 1080)),
+    })
+}
+
+async fn mirror_command(a: MirrorArgs, store: &mut Store) -> Result<()> {
+    let options = MirrorOptions {
+        fps: a.fps,
+        bitrate_kbps: a.bitrate,
+    };
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let mut out = std::io::stdout();
+    if let Some(path) = &a.to_file {
+        let source = frame_source(a.source)?;
+        return mirror::cli::record(source, path, a.size, options, a.seconds, ctrl_c, &mut out).await;
+    }
+    let Some(display) = a.display else {
+        bail!("--display is required");
+    };
+    let client = Arc::new(connect(a.target.as_deref(), store).await?);
+    let source = frame_source(a.source)?;
+    mirror::cli::mirror(client, store, display, options, source, a.seconds, ctrl_c, &mut out).await
 }
 
 #[derive(Subcommand)]
@@ -710,6 +799,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Usb { cmd } => usb(cmd, &mut store).await?,
         Cmd::Serial(a) => serial(a, &mut store).await?,
+        Cmd::Displays { target, json } => {
+            let c = connect(target.as_deref(), &mut store).await?;
+            mirror::cli::displays(&c, json, &mut std::io::stdout()).await?;
+            c.close().await;
+        }
+        Cmd::Mirror(a) => mirror_command(a, &mut store).await?,
         Cmd::Agents => {
             if store.data.agents.is_empty() {
                 println!("No paired agents. Host id {}.", short(&store.data.host_id));
