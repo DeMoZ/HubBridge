@@ -3,6 +3,7 @@ package com.demoz.hubbridge
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.ConnectivityManager
@@ -66,11 +67,23 @@ class MainActivity : Activity() {
 
         setContentView(ScrollView(this).apply { addView(col) })
         handleUsbIntent(intent)
+        // Not again when the activity is recreated.
+        if (savedInstanceState == null) handleSpikeIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleUsbIntent(intent)
+        handleSpikeIntent(intent)
+    }
+
+    /** `am start … --es spike <route>` (design D1). The only way into the spike: debuggable builds only. */
+    private fun handleSpikeIntent(intent: Intent?) {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        // Reopening from Recents replays the old intent.
+        if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val route = intent.getStringExtra("spike") ?: return
+        BridgeService.sendSpike(this, route)
     }
 
     /** Opened by USB_DEVICE_ATTACHED ("open HubBridge for this device?"): permission is now granted. */

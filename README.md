@@ -16,7 +16,7 @@ Android agent (Kotlin + Rust core) Â· desktop app for macOS and Windows (Rust) Â
 ## Install
 
 Download from [Releases](https://github.com/DeMoZ/HubBridge/releases). macOS builds are for
-Apple Silicon (macOS 11+). There are no Windows downloads yet: on Windows, run HubBridge from
+Apple Silicon (macOS 13 or later). There are no Windows downloads yet: on Windows, run HubBridge from
 source only.
 
 1. **macOS app.** Open `HubBridge-macOS-v<version>.dmg` and drag HubBridge to Applications.

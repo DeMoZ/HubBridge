@@ -167,6 +167,8 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 
 ## 5. Released builds
 
+- **The macOS app and CLI need macOS 13 or later** (Apple Silicon). v0.1.0 was built for
+  macOS 11 or later.
 - **The macOS app is not notarized.** It is signed ad hoc (no Apple Developer ID), so a
   downloaded copy is stopped on its first start ("Not Opened", "Apple could not verify…") until
   you press **Open Anyway** in System Settings → Privacy & Security, or remove the quarantine

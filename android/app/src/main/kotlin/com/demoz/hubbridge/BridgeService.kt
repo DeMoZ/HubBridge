@@ -40,6 +40,7 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var running = false
+    private var spike: DisplaySpike? = null
     /** Connections opened for hosts, by device id. */
     private val connections = ConcurrentHashMap<Int, UsbDeviceConnection>()
 
@@ -84,6 +85,12 @@ class BridgeService : Service(), NativeAgent.Callbacks {
                 notifyChanged()
             }
             ACTION_RESCAN -> pushDevices()
+            ACTION_SPIKE -> {
+                startForegroundNow()
+                if (!running) startAgent(lanMode)
+                val route = intent.getStringExtra(EXTRA_SPIKE) ?: ""
+                (spike ?: DisplaySpike(this).also { spike = it }).run(route)
+            }
             else -> {
                 startForegroundNow()
                 val lan = intent?.getBooleanExtra(EXTRA_LAN, true) ?: true
@@ -255,6 +262,8 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     override fun onDestroy() {
         instance = null
         running = false
+        spike?.stop()
+        spike = null
         unregisterReceiver(usbReceiver)
         for (c in connections.values) c.close()
         connections.clear()
@@ -279,6 +288,8 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         const val ACTION_RESCAN = "com.demoz.hubbridge.RESCAN"
         const val ACTION_USB_PERMISSION = "com.demoz.hubbridge.USB_PERMISSION"
         const val EXTRA_LAN = "lan"
+        private const val ACTION_SPIKE = "com.demoz.hubbridge.SPIKE"
+        private const val EXTRA_SPIKE = "spike"
 
         @Volatile var instance: BridgeService? = null
             private set
@@ -300,6 +311,12 @@ class BridgeService : Service(), NativeAgent.Callbacks {
             if (!isRunning) return null
             val s = NativeAgent.status()
             return if (s.isEmpty()) null else try { JSONObject(s) } catch (_: Exception) { null }
+        }
+
+        /** Display spike (design D1). Call only from MainActivity's debuggable check. */
+        fun sendSpike(context: Context, route: String) {
+            val i = Intent(context, BridgeService::class.java).setAction(ACTION_SPIKE).putExtra(EXTRA_SPIKE, route)
+            context.startForegroundService(i)
         }
 
         fun send(context: Context, action: String, lan: Boolean = lanMode) {
