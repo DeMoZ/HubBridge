@@ -7,6 +7,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod donations;
+mod net;
+mod update;
 
 use std::sync::Arc;
 
@@ -19,6 +22,8 @@ use wry::WebViewBuilder;
 enum UserEvent {
     Js(String),
     DragWindow,
+    /// Quit so that the update script can replace the app.
+    Quit,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,9 +42,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let push: app::Push = Arc::new(move |script| {
         let _ = proxy.send_event(UserEvent::Js(script));
     });
+    let quit_proxy = event_loop.create_proxy();
+    let exit: app::Exit = Arc::new(move || {
+        let _ = quit_proxy.send_event(UserEvent::Quit);
+    });
     let app = {
         let _guard = rt.enter();
-        app::App::new(rt.handle().clone(), push)?
+        app::App::new(rt.handle().clone(), push, exit)?
     };
 
     #[allow(unused_mut)]
@@ -95,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(UserEvent::DragWindow) => {
                 let _ = window.drag_window();
             }
+            Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
             _ => {}
         }
     });
@@ -328,6 +338,32 @@ mod tests {
             tag.contains("id=\"stLive\""),
             "the live region must be #stLive, found `{tag}`"
         );
+    }
+
+    #[test]
+    fn no_rule_hides_the_status_dot() {
+        let start = page().find("<style>").expect("style") + 7;
+        let css = &page()[start..page().find("</style>").expect("style closes")];
+        // `#status` is a `.pill` too: a rule hiding a dot has to name the version pill.
+        let mut hiding = 0;
+        for rule in css.split('}') {
+            let Some((selectors, body)) = rule.rsplit_once('{') else {
+                continue;
+            };
+            let body: String = body.split_whitespace().collect();
+            if !["display:none", "visibility:hidden"].iter().any(|d| body.contains(d)) {
+                continue;
+            }
+            let selectors = selectors.rsplit('{').next().unwrap_or_default();
+            for selector in selectors.split(',').map(str::trim) {
+                let last = selector.split_whitespace().last().unwrap_or_default();
+                if last.contains(".dot") || selector.contains("#stMark") {
+                    hiding += 1;
+                    assert!(selector.starts_with("#updBtn"), "`{selector}` hides the status dot");
+                }
+            }
+        }
+        assert!(hiding > 0, "the scan finds the rule of the version pill");
     }
 
     // ---- colors -------------------------------------------------------------------------------
@@ -739,6 +775,32 @@ mod tests {
     }
 
     #[test]
+    fn the_update_sheet_does_not_open_over_another_sheet() {
+        let body = js_function("offerUpdate");
+        for id in ["pairModal", "donateModal"] {
+            assert!(body.contains(&format!("\"{id}\"")), "offerUpdate must wait for #{id}");
+        }
+    }
+
+    /// Where the element opened at byte `open` closes (nested elements of the same tag are counted).
+    fn element_end(open: usize, tag: &str) -> usize {
+        let (start, close) = (format!("<{tag}"), format!("</{tag}>"));
+        let mut depth = 0;
+        for (j, _) in page()[open..].match_indices('<') {
+            let t = &page()[open + j..];
+            if t.starts_with(&start) {
+                depth += 1;
+            } else if t.starts_with(&close) {
+                depth -= 1;
+                if depth == 0 {
+                    return open + j;
+                }
+            }
+        }
+        panic!("<{tag}> at byte {open} is not closed");
+    }
+
+    #[test]
     fn every_put_host_has_a_focusable_fallback() {
         let sc = script();
         let mut hosts = std::collections::BTreeSet::new();
@@ -747,7 +809,23 @@ mod tests {
                 hosts.insert(&part[..end]);
             }
         }
-        assert!(!hosts.is_empty(), "no put() hosts found");
+        for id in ["devices", "updStatus", "updActions", "donateMethods"] {
+            assert!(hosts.contains(id), "put host #{id} not found by the scan");
+        }
+        assert!(
+            js_function("put").contains("headingOf(host.closest(\".panel, .sheet\") || host).focus()"),
+            "put() must hand a lost focus to the panel or sheet heading"
+        );
+        assert!(
+            js_function("setHidden").contains("headingOf(el.closest(\".sheet\")).focus()"),
+            "hiding a focused control must hand the focus to the sheet heading"
+        );
+        // The containers that can take over the focus: (tag, opening text, heading of its kind).
+        let containers = [
+            ("section", "<section class=\"panel\"", "<h2"),
+            ("div", "<div class=\"sheet\"", "<h3"),
+            ("div", "<div class=\"sheet wide\"", "<h3"),
+        ];
         for id in hosts {
             let at = page()
                 .find(&format!("id=\"{id}\""))
@@ -755,56 +833,77 @@ mod tests {
             if ["stMark", "stText", "stLive"].contains(&id) {
                 continue;
             }
-            let mut open: Vec<usize> = Vec::new();
-            let mut i = 0;
-            while i < at {
-                let rest = &page()[i..at];
-                let (o, c) = (rest.find("<section"), rest.find("</section>"));
-                match (o, c) {
-                    (Some(o), c) if c.is_none_or(|c| o < c) => {
-                        open.push(i + o);
-                        i += o + 1;
-                    }
-                    (_, Some(c)) => {
-                        open.pop();
-                        i += c + 1;
-                    }
-                    _ => break,
-                }
-            }
-            let tag_of = |p: usize| &page()[p..p + page()[p..].find('>').unwrap()];
-            let panel = *open
+            let (container, end, heading) = containers
                 .iter()
-                .rev()
-                .find(|&&p| tag_of(p).contains("class=\"panel\""))
-                .unwrap_or_else(|| panic!("put host #{id} is not inside a panel section"));
-            let mut depth = 0;
-            let mut end = panel;
-            for (j, _) in page()[panel..].match_indices('<') {
-                let t = &page()[panel + j..];
-                if t.starts_with("<section") {
-                    depth += 1;
-                } else if t.starts_with("</section>") {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = panel + j;
-                        break;
-                    }
-                }
-            }
-            assert!(end > at, "panel of #{id} does not enclose it");
-            let body = &page()[panel..end];
+                .flat_map(|&(tag, opening, heading)| {
+                    page()[..at]
+                        .match_indices(opening)
+                        .map(move |(open, _)| (open, element_end(open, tag), heading))
+                })
+                .filter(|&(_, end, _)| end > at)
+                .max_by_key(|&(open, _, _)| open)
+                .unwrap_or_else(|| panic!("put host #{id} is not inside a panel section or a sheet"));
+            let tag_of = |p: usize| &page()[p..p + page()[p..].find('>').unwrap()];
+            let body = &page()[container..end];
             let focusable = |tag: &str| tag.contains("tabindex=\"-1\"");
-            match body.find("<h2") {
+            match body.find(heading) {
                 Some(h) => assert!(
                     focusable(&body[h..h + body[h..].find('>').unwrap()]),
-                    "first h2 of the panel of #{id} has no tabindex=-1"
+                    "first {heading}> around #{id} has no tabindex=-1"
                 ),
                 None => assert!(
-                    focusable(tag_of(panel)),
-                    "panel of #{id} has no h2 and no tabindex=-1 on itself"
+                    focusable(tag_of(container)),
+                    "the container of #{id} has no {heading}> and no tabindex=-1 on itself"
                 ),
             }
         }
+    }
+
+    /// The names of the keys of one language block of `I18N` (string contents are skipped).
+    fn i18n_keys(lang: &str) -> std::collections::BTreeSet<&'static str> {
+        let table = &script()[script().find("const I18N = {").expect("I18N table")..];
+        let open = format!("\n  {lang}: {{\n");
+        let from = table.find(&open).unwrap_or_else(|| panic!("no `{lang}` block")) + open.len();
+        let block = &table[from..from + table[from..].find("\n  },\n").expect("block closes")];
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut keys = std::collections::BTreeSet::new();
+        let mut chars = block.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c == '"' {
+                while let Some((_, s)) = chars.next() {
+                    match s {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            } else if word(c) {
+                let mut end = i + 1;
+                while let Some(&(j, n)) = chars.peek()
+                    && word(n)
+                {
+                    end = j + 1;
+                    chars.next();
+                }
+                if block[end..].trim_start().starts_with(':') {
+                    assert!(keys.insert(&block[i..end]), "`{}` is twice in `{lang}`", &block[i..end]);
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn i18n_keys_match() {
+        let (en, ru) = (i18n_keys("en"), i18n_keys("ru"));
+        assert!(en.contains("network") && en.contains("updBridges"), "the scan works");
+        let missing_ru: Vec<_> = en.difference(&ru).collect();
+        let missing_en: Vec<_> = ru.difference(&en).collect();
+        assert!(
+            missing_ru.is_empty() && missing_en.is_empty(),
+            "missing in ru: {missing_ru:?}; missing in en: {missing_en:?}"
+        );
     }
 }
