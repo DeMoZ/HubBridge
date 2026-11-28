@@ -141,6 +141,19 @@ pub donate: DonateView,   // loading, offline, info: Option<donations::Info>
 - `UpdateInstall` is refused with `updWaitBusy` while `Model.busy` has an `install:*` entry or
   `pair` (an APK install or a pairing is talking to the phone); spec "Update refused while the
   phone is busy".
+- `UpdateInstall` also does nothing unless `can_update`, `writable` and not `no_file` (the page
+  only hides the button).
+- After the download, the last busy check and a `closing` flag are set under one model lock
+  (`Model::begin_shutdown`). While it is set, `Model::begin_action` refuses a new APK install,
+  pairing or bridge start (error toast). Bridges already starting are waited for (30 s at most)
+  before all bridges are stopped. `update_stopped` clears the flag.
+- A download that will not be installed removes its `HubBridge-update-<version>` folder (digest or
+  unpack failure, busy phone, installer not started; the replace scripts also when the swap fails).
+- The macOS script deletes what is at the app's place only after the current app was really moved
+  to `HubBridge.app.old` (not when a leftover `.old` is still there): a partial app from a failed
+  move across volumes is removed and the old one restored; otherwise the app is not touched.
+- The Windows script is written with a UTF-8 byte order mark (Windows PowerShell 5.1 would read
+  it in the ANSI code page), and `ps_quote` also doubles the typographic single quotes.
 - Order: download + verify + unpack (window keeps working, status `updDownloading`) →
   `stop_all_bridges("the app is updating")` → `disconnect()` → `start_install(source, target)` →
   status `updRestarting` → call the exit hook. If `start_install` fails, bridges stay stopped

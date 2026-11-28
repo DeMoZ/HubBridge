@@ -37,7 +37,7 @@ When the latest release is newer but has no update file for this system, the app
 - **THEN** the sheet says version 0.2.0 is out but has no download for this system, and offers "Open release page"
 
 ### Requirement: Automatic check once a day
-When "Check for updates automatically (once a day)" is on (the default), the app SHALL check in the background at start and while running, at most once per 24 hours across restarts, and SHALL open the update sheet when it finds a newer version that the user did not skip. The setting SHALL be saved.
+When "Check for updates automatically (once a day)" is on (the default), the app SHALL check in the background at start and while running, at most once per 24 hours across restarts, and SHALL open the update sheet when it finds a newer version that the user did not skip. A newer version without an update file for this system SHALL NOT open the sheet by itself; only the version pill changes. The setting SHALL be saved.
 
 #### Scenario: Background find
 - **WHEN** the setting is on, the last check was 25 hours ago, and the app starts while v0.2.0 is published

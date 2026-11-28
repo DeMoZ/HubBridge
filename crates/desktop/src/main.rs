@@ -340,6 +340,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_rule_hides_the_status_dot() {
+        let start = page().find("<style>").expect("style") + 7;
+        let css = &page()[start..page().find("</style>").expect("style closes")];
+        // `#status` is a `.pill` too: a rule hiding a dot has to name the version pill.
+        let mut hiding = 0;
+        for rule in css.split('}') {
+            let Some((selectors, body)) = rule.rsplit_once('{') else {
+                continue;
+            };
+            let body: String = body.split_whitespace().collect();
+            if !["display:none", "visibility:hidden"].iter().any(|d| body.contains(d)) {
+                continue;
+            }
+            let selectors = selectors.rsplit('{').next().unwrap_or_default();
+            for selector in selectors.split(',').map(str::trim) {
+                let last = selector.split_whitespace().last().unwrap_or_default();
+                if last.contains(".dot") || selector.contains("#stMark") {
+                    hiding += 1;
+                    assert!(selector.starts_with("#updBtn"), "`{selector}` hides the status dot");
+                }
+            }
+        }
+        assert!(hiding > 0, "the scan finds the rule of the version pill");
+    }
+
     // ---- colors -------------------------------------------------------------------------------
 
     type Rgb = [f64; 3];
@@ -746,6 +772,14 @@ mod tests {
             script().contains("el.inert = on"),
             "setInert must set the inert property"
         );
+    }
+
+    #[test]
+    fn the_update_sheet_does_not_open_over_another_sheet() {
+        let body = js_function("offerUpdate");
+        for id in ["pairModal", "donateModal"] {
+            assert!(body.contains(&format!("\"{id}\"")), "offerUpdate must wait for #{id}");
+        }
     }
 
     /// Where the element opened at byte `open` closes (nested elements of the same tag are counted).

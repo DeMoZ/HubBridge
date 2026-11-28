@@ -175,9 +175,9 @@ body::before {
 button.pill { cursor: pointer; transition: background var(--dur-1), color var(--dur-1); }
 button.pill:hover { background: var(--surface-2); color: var(--text-1); }
 .pill svg { width: 14px; height: 14px; flex: none; }
-.pill .dot { display: none; }
+#updBtn .dot { display: none; }
 .pill.has-update, button.pill.has-update:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
-.pill.has-update .dot { display: inline-block; background: var(--accent); }
+#updBtn.has-update .dot { display: inline-block; background: var(--accent); }
 button.pill.support:hover { color: var(--support); border-color: color-mix(in srgb, var(--support) 55%, transparent); }
 .island { max-width: 100%; min-width: 0; overflow: hidden; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -843,6 +843,7 @@ function setHidden(id, hidden) {
 }
 const sheetBtn = (label, act, cls, disabled = false) => `<button class="btn ${cls}" type="button" data-act="${act}" ${disabled ? "disabled" : ""}>${esc(label)}</button>`;
 
+let shownAuto = null;
 function renderUpdate() {
   const u = M.update, a = u.available;
   const installable = u.can_update && u.writable && !u.no_file;
@@ -855,7 +856,8 @@ function renderUpdate() {
   setHidden("updWarn", !(a && u.can_update && !u.writable && !u.no_file));
   setHidden("updBridges", !(a && installable && (M.serial || []).some((v) => v.running)));
   setHidden("updDev", u.can_update);
-  $("autoUpdate").checked = u.auto_update;
+  // Written only when the setting changes: a push made before a click must not undo the tick for a moment.
+  if (u.auto_update !== shownAuto) $("autoUpdate").checked = shownAuto = u.auto_update;
   const text = u.status ? t(u.status.key, u.status.args) : "";
   const busy = u.checking || u.downloading;
   $("updStatus").className = "status-line sel " + (u.checking ? "" : u.downloading ? "new" : u.status ? u.status.kind : "");
@@ -891,9 +893,10 @@ let lastOffer = 0;
 let failedShown = false;
 function offerUpdate() {
   if ($("updateModal").classList.contains("open")) return;
-  // Not over the PIN field: the sheet opens when the pairing sheet is closed.
-  if ($("pairModal").classList.contains("open")) {
-    $("pairModal").addEventListener("sheetclose", () => setTimeout(offerUpdate, 0), { once: true });
+  // Not over another sheet (the PIN field, Support): the update sheet opens when that one is closed.
+  const other = ["pairModal", "donateModal"].map($).find((m) => m.classList.contains("open"));
+  if (other) {
+    other.addEventListener("sheetclose", () => setTimeout(offerUpdate, 0), { once: true });
     return;
   }
   openSheet("updateModal", "updBtn");

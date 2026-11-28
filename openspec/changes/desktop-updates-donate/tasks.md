@@ -82,6 +82,23 @@ checks in 7.3).
 - [x] 8.3 Regression: with the simulator connected and a serial bridge running in a dev build, open and close both sheets, press "Check for updates" (disabled in a dev build) and confirm the bridge counters keep growing and no request reaches Rust except `donate_open` / `open_url` (watch `HUBBRIDGE_LOG=debug`)
   - Result: dev build, agent simulator, serial bridge with traffic: counters grew from 384 to 10944 bytes while both sheets were opened and closed; "Check for updates" disabled; after the bridge started only `donate_open` and `open_url` reached Rust. `HUBBRIDGE_LOG=debug` does not log page requests, so a temporary probe printed them (and replaced the browser launch with a print); reverted.
 
+## 9. Review fixes
+
+- [x] 9.1 Status dot: the hiding rule names `#updBtn`; test `no_rule_hides_the_status_dot`
+  - Result: the test fails with the old `.pill .dot` rule. Dev build window (scratch `HUBBRIDGE_HOME`, fake `ADB`): `#stMark .dot` is `display: block`, 8 px (11.3 px box for the rotated error dot) in idle, connecting, connected, reconnecting and needs-pair models; the version pill's dot is hidden without an update and 8 px with one; a window screenshot shows the idle ring.
+- [x] 9.2 Windows script: UTF-8 BOM, `ps_quote` doubles U+2018, U+2019, U+201A, U+201B
+  - Result: `windows_script_file_has_a_byte_order_mark` and `scripts_quote_paths` pass on macOS; `net.rs` and `update.rs` pass clippy for `x86_64-pc-windows-msvc` in a scratch crate without `ring`. PowerShell 7 (`pwsh` on macOS) parses the generated script without errors and reads back a BOM script's path with Cyrillic and all five quote characters unchanged. **Not run in Windows PowerShell 5.1.**
+- [x] 9.3 Shutdown phase: no new APK install, pairing or bridge start; bridges still starting are waited for; the flag is cleared when the install stops
+  - Result: `nothing_new_starts_once_the_app_closes_for_an_update` and `shutdown_waits_for_starting_bridges` pass. **The timing gap was not reproduced end to end.**
+- [x] 9.4 The download folder is removed when the update is not installed, also by the failed swap in the replace scripts
+  - Result: `a_failed_download_leaves_no_folder`, `discard_removes_only_a_download_folder`, `mac_script_restores_the_old_app_when_the_swap_fails` (extended) and `scripts_quote_paths` (Windows order) pass; the `discard` calls in `update_install` are checked by reading only.
+- [x] 9.5 `update_install` guard; the update sheet waits for the Support sheet; the auto-update checkbox is written only when the setting changes; docs and spec delta
+  - Result: `only_an_installable_update_is_installed` and `the_update_sheet_does_not_open_over_another_sheet` pass (the latter fails on the old code). In the window: a stale push after a click left the box unticked; with Support open an offer did not open the update sheet, and it opened after Support closed, focus on its close button. `openspec validate desktop-updates-donate --strict` passes.
+
+- [x] 9.6 macOS script: a partial app left by a failed move across volumes is removed and the old one restored, only after the old app was really moved aside; the download folder is removed after the restore
+  - Result: `mac_script_removes_a_partly_moved_app` (the move of the new app replaced by one that leaves a partial folder and fails) and `mac_script_keeps_the_app_it_could_not_move_aside` (move aside fails; a leftover `.app.old` that was not removed) pass with the two older script tests; both new tests fail with the previous script. **Not run with a real second volume.** The Windows script has the same class of problem and is unchanged: `robocopy /E` copies over the installed folder with no backup, so a failed copy can leave a mix of old and new files, which it then starts with `--update-failed`; no Windows file is released.
+- After the fixes: `cargo fmt --all`, clippy `-D warnings` clean, `cargo test --workspace`: 221 passed, 0 failed.
+
 ## Workflow follow-up
 
 - Review (fresh Opus subagent) against both specs and this design.

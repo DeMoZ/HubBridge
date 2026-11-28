@@ -99,11 +99,15 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Modules besides the controller: `net.rs` (the system `curl`, so the app carries no TLS library;
   opens only `https://` links), `update.rs` (latest GitHub release, SHA-256 check against the
   published digest, unpacking, the bundle id check, the script that replaces the app after it quits)
-  and `donations.rs` (the Support sheet's list). Their files live in the HubBridge config folder,
-  or in `HUBBRIDGE_HOME`.
+  and `donations.rs` (the Support sheet's list). The saved donations list lives in the HubBridge
+  config folder (or in `HUBBRIDGE_HOME`); the update download (`HubBridge-update-<version>`,
+  removed after the install or when it fails) and the replace script (`HubBridge-update.sh` /
+  `.ps1`) are in the system temp folder.
 - Updating works only in a release build that runs from `HubBridge.app` (or the `.exe` folder on
-  Windows). It is refused while the phone app is being installed or a pairing runs; running serial
-  bridges are stopped and the phone is disconnected before the app quits. For checks,
+  Windows). It is refused while the phone app is being installed or a pairing runs. After the last
+  such check no APK install, pairing or bridge start can begin; bridges still starting are waited
+  for (30 s at most), then all bridges are stopped and the phone is disconnected before the app
+  quits. For checks,
   `HUBBRIDGE_UPDATES_URL` (`https://` only) replaces the address of the latest release.
 - The release notes are shown in the update window up to the first "Install" / "Установка" heading,
   so those sections come last in `docs/releases/v<version>.md`.

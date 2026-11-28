@@ -54,6 +54,9 @@ pub struct Model {
     pub pty_supported: bool,
     /// Running actions, e.g. "install:R28M303RHET", "pair", "wifi:R28M303RHET".
     pub busy: BTreeSet<String>,
+    /// The app is closing for an update: no APK install, pairing or bridge start may begin.
+    #[serde(skip)]
+    closing: bool,
     pub update: UpdateView,
     pub donate: DonateView,
 }
@@ -137,6 +140,20 @@ pub struct SerialView {
 }
 
 impl Model {
+    /// Marks an APK install, a pairing or a bridge start as running; refused once the app closes for an update.
+    fn begin_action(&mut self, key: &str) -> bool {
+        if !self.closing {
+            self.busy.insert(key.to_string());
+        }
+        !self.closing
+    }
+
+    /// The last busy check before an update and the start of the shutdown, in one step.
+    fn begin_shutdown(&mut self) -> bool {
+        self.closing = !update_blocked(&self.busy);
+        self.closing
+    }
+
     /// Recompute which devices a serial driver fits.
     fn refresh_serial_capable(&mut self) {
         self.serial_capable = self
@@ -339,6 +356,21 @@ fn should_auto_check(s: &Settings, can_update: bool, now: u64) -> bool {
 /// Whether the update sheet opens by itself for the version `found`.
 fn should_offer(manual: bool, skipped: &str, found: &str) -> bool {
     manual || skipped != found
+}
+
+/// Installing needs a packaged app in a writable folder and a release with a file for this system.
+fn can_install(view: &UpdateView) -> bool {
+    view.can_update && view.writable && !view.no_file
+}
+
+/// How long the shutdown for an update waits for bridges that are still starting.
+const STARTING_WAIT: Duration = Duration::from_secs(30);
+
+async fn wait_for_starts(starting: &Mutex<BTreeSet<u32>>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    while !lock(starting).is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// An update waits while the app talks to the phone: an APK install or a pairing.
@@ -566,6 +598,16 @@ impl App {
             m.refresh_serial_capable();
         }
         self.push_model();
+    }
+
+    /// `set_busy(key, true)` for what must not start while the app closes for an update.
+    fn claim_busy(&self, key: &str) -> bool {
+        let mut ok = false;
+        self.update(|m| ok = m.begin_action(key));
+        if !ok {
+            self.toast("err", "The app is restarting to update.");
+        }
+        ok
     }
 
     fn set_busy(&self, key: &str, on: bool) {
@@ -969,7 +1011,7 @@ impl App {
         };
         let blocked = {
             let mut m = lock(&self.model);
-            if m.update.checking || m.update.downloading {
+            if m.update.checking || m.update.downloading || !can_install(&m.update) {
                 return;
             }
             let blocked = update_blocked(&m.busy);
@@ -995,16 +1037,20 @@ impl App {
                 Ok(s) => s,
                 Err(e) => return me.update_stopped("updFailed", json!({ "err": e })),
             };
-            // A pairing or an APK install may have started during the download.
-            if update_blocked(&lock(&me.model).busy) {
-                return me.update_stopped("updWaitBusy", json!({}));
-            }
             let Some(target) = update::install_target() else {
+                update::discard(&source);
                 return me.update_stopped(
                     "updFailed",
                     json!({ "err": "could not find where the app is installed" }),
                 );
             };
+            // A pairing or an APK install may have started during the download; from here on none can start.
+            if !lock(&me.model).begin_shutdown() {
+                update::discard(&source);
+                return me.update_stopped("updWaitBusy", json!({}));
+            }
+            // A bridge that is still starting has to be registered before it can be stopped.
+            wait_for_starts(&me.starting, STARTING_WAIT).await;
             me.stop_all_bridges("the app is updating").await;
             me.disconnect_and_wait().await;
             match update::start_install(&source, &target) {
@@ -1013,10 +1059,13 @@ impl App {
                     // The replace script waits for this process to end.
                     (me.exit)();
                 }
-                Err(e) => me.update_stopped(
-                    "updFailed",
-                    json!({ "err": format!("could not start the installer: {e}") }),
-                ),
+                Err(e) => {
+                    update::discard(&source);
+                    me.update_stopped(
+                        "updFailed",
+                        json!({ "err": format!("could not start the installer: {e}") }),
+                    );
+                }
             }
         });
     }
@@ -1024,6 +1073,7 @@ impl App {
     /// The install did not happen and the app keeps running.
     fn update_stopped(&self, key: &'static str, args: serde_json::Value) {
         self.update(|m| {
+            m.closing = false;
             m.update.downloading = false;
             m.update.status = UpdateStatus::new("err", key, args);
         });
@@ -1158,7 +1208,9 @@ impl App {
             return fail("Choose a PTY or a TCP port.".into());
         }
         let key = format!("serial:{id}");
-        self.set_busy(&key, true);
+        if !self.claim_busy(&key) {
+            return;
+        }
         let opts = BridgeOptions {
             config: SerialConfig {
                 line: Line {
@@ -1234,7 +1286,9 @@ impl App {
 
     async fn install(self: &Arc<Self>, serial: String) {
         let key = format!("install:{serial}");
-        self.set_busy(&key, true);
+        if !self.claim_busy(&key) {
+            return;
+        }
         let opts = InstallOptions {
             serial: Some(serial.clone()),
             apk: None,
@@ -1314,7 +1368,9 @@ impl App {
     }
 
     async fn pair(self: &Arc<Self>, target: Target, pin: String) {
-        self.set_busy("pair", true);
+        if !self.claim_busy("pair") {
+            return;
+        }
         self.stop_connection();
         let res = async {
             let pin = pin.trim().to_string();
@@ -1705,6 +1761,62 @@ mod tests {
         assert!(!update_blocked(&busy("wifi:R28M")));
         assert!(!update_blocked(&busy("adbpair")));
         assert!(!update_blocked(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn nothing_new_starts_once_the_app_closes_for_an_update() {
+        let mut m = Model::default();
+        assert!(m.begin_action("pair"));
+        assert!(!m.begin_shutdown(), "a pairing runs");
+        assert!(m.begin_action("install:R28M"), "a refused shutdown blocks nothing");
+        m.busy.clear();
+        // A bridge that is starting does not refuse the update: the shutdown waits for it.
+        assert!(m.begin_action("serial:1"));
+        assert!(m.begin_shutdown());
+        for key in ["install:R28M", "pair", "serial:2"] {
+            assert!(!m.begin_action(key), "{key}");
+            assert!(!m.busy.contains(key), "{key}");
+        }
+        // The installer did not start: update_stopped clears the flag.
+        m.closing = false;
+        assert!(m.begin_action("pair"));
+    }
+
+    #[test]
+    fn shutdown_waits_for_starting_bridges() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let set = Mutex::new(BTreeSet::new());
+            let guard = StartGuard::reserve(&set, 7).unwrap();
+            let finish = async {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                drop(guard);
+            };
+            let began = Instant::now();
+            tokio::join!(wait_for_starts(&set, Duration::from_secs(20)), finish);
+            assert!(began.elapsed() >= Duration::from_millis(250));
+            assert!(began.elapsed() < Duration::from_secs(20));
+
+            let _stuck = StartGuard::reserve(&set, 8).unwrap();
+            wait_for_starts(&set, Duration::from_millis(150)).await;
+        });
+    }
+
+    #[test]
+    fn only_an_installable_update_is_installed() {
+        let view = |can_update, writable, no_file| UpdateView {
+            can_update,
+            writable,
+            no_file,
+            ..UpdateView::default()
+        };
+        assert!(can_install(&view(true, true, false)));
+        assert!(!can_install(&view(false, true, false)), "development build");
+        assert!(!can_install(&view(true, false, false)), "read-only folder");
+        assert!(!can_install(&view(true, true, true)), "no file for this system");
     }
 
     #[test]

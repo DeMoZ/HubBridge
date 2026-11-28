@@ -176,12 +176,29 @@ pub fn download(release: &Release) -> Result<PathBuf, String> {
         .as_ref()
         .ok_or("the release does not publish a SHA-256 for this file")?;
     let work = std::env::temp_dir().join(format!("{WORK_PREFIX}{}", format_version(release.version)));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    prepare(&work, expected, |zip| net::download(&asset.url, zip))
+}
+
+/// Fills a fresh `work` folder with the checked and unpacked archive; on failure the folder is removed.
+fn prepare(work: &Path, expected: &str, fetch: impl FnOnce(&Path) -> Result<(), String>) -> Result<PathBuf, String> {
+    let _ = std::fs::remove_dir_all(work);
+    std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let zip = work.join("update.zip");
-    net::download(&asset.url, &zip)?;
-    verify(&zip, expected)?;
-    unpack(&zip, &work)
+    let result = fetch(&zip)
+        .and_then(|()| verify(&zip, expected))
+        .and_then(|()| unpack(&zip, work));
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(work);
+    }
+    result
+}
+
+/// Removes the download folder of an unpacked update that will not be installed.
+pub fn discard(source: &Path) {
+    let work = work_dir(source);
+    if work != source {
+        let _ = std::fs::remove_dir_all(work);
+    }
 }
 
 fn verify(zip: &Path, expected: &str) -> Result<(), String> {
@@ -256,8 +273,17 @@ fn find(dir: &Path, pred: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     None
 }
 
+/// A single-quoted PowerShell string. PowerShell also ends it at a typographic single quote, so those are doubled too.
 fn ps_quote(p: &Path) -> String {
-    format!("'{}'", p.to_string_lossy().replace('\'', "''"))
+    let mut quoted = String::from("'");
+    for c in p.to_string_lossy().chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn sh_quote(p: &Path) -> String {
@@ -277,7 +303,8 @@ fn work_dir(source: &Path) -> PathBuf {
 }
 
 /// The script for a Mac: waits for the program (`pid`) to quit, swaps the .app for the new one and starts it.
-/// If the swap fails, it puts the old one back and starts it with `--update-failed`.
+/// If the swap fails, it puts the old one back and starts it with `--update-failed`. A move from another volume can
+/// leave a partial .app: it is removed only after the old one was really moved aside.
 pub fn mac_script(source: &Path, target: &Path, pid: u32) -> String {
     let old = target.with_extension("app.old");
     let (s, t, o, w) = (
@@ -290,33 +317,41 @@ pub fn mac_script(source: &Path, target: &Path, pid: u32) -> String {
         "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
          sleep 0.5\n\
          rm -rf {o}\n\
-         if mv {t} {o} && mv {s} {t}; then\n\
-         \x20 rm -rf {o} {w}\n\
-         \x20 xattr -dr com.apple.quarantine {t} 2>/dev/null\n\
-         \x20 open {t}\n\
-         else\n\
-         \x20 [ -e {t} ] || mv {o} {t}\n\
-         \x20 open {t} --args --update-failed\n\
-         fi\n"
+         if [ ! -e {o} ] && mv {t} {o}; then\n\
+         \x20 if mv {s} {t}; then\n\
+         \x20   rm -rf {o} {w}\n\
+         \x20   xattr -dr com.apple.quarantine {t} 2>/dev/null\n\
+         \x20   open {t}\n\
+         \x20   exit 0\n\
+         \x20 fi\n\
+         \x20 rm -rf {t} && mv {o} {t}\n\
+         fi\n\
+         rm -rf {w}\n\
+         open {t} --args --update-failed\n"
     )
 }
 
 /// The script for Windows: waits for the program to quit, copies the new files over it and starts it.
 pub fn windows_script(source: &Path, target: &Path, pid: u32) -> String {
     let exe = target.join(EXE);
+    let work = ps_quote(&work_dir(source));
     format!(
         "Wait-Process -Id {pid} -ErrorAction SilentlyContinue\r\n\
          Start-Sleep -Milliseconds 500\r\n\
          robocopy {} {} /E /R:10 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null\r\n\
-         if ($LASTEXITCODE -ge 8) {{ Start-Process -FilePath {} -ArgumentList '--update-failed'; exit 1 }}\r\n\
-         Remove-Item -LiteralPath {} -Recurse -Force -ErrorAction SilentlyContinue\r\n\
-         Start-Process -FilePath {}\r\n",
+         $failed = $LASTEXITCODE -ge 8\r\n\
+         Remove-Item -LiteralPath {work} -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+         if ($failed) {{ Start-Process -FilePath {exe} -ArgumentList '--update-failed'; exit 1 }}\r\n\
+         Start-Process -FilePath {exe}\r\n",
         ps_quote(source),
         ps_quote(target),
-        ps_quote(&exe),
-        ps_quote(&work_dir(source)),
-        ps_quote(&exe),
+        exe = ps_quote(&exe),
     )
+}
+
+/// With a byte order mark: without one Windows PowerShell 5.1 reads the file in the ANSI code page.
+fn write_ps_script(path: &Path, script: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("\u{feff}{script}"))
 }
 
 /// Starts the replace script; the program has to quit after this.
@@ -324,7 +359,7 @@ pub fn start_install(source: &Path, target: &Path) -> Result<(), String> {
     let pid = std::process::id();
     if cfg!(windows) {
         let script = std::env::temp_dir().join("HubBridge-update.ps1");
-        std::fs::write(&script, windows_script(source, target, pid)).map_err(|e| e.to_string())?;
+        write_ps_script(&script, &windows_script(source, target, pid)).map_err(|e| e.to_string())?;
         command("powershell.exe")
             .args([
                 "-NoProfile",
@@ -442,7 +477,54 @@ mod tests {
         assert!(w.contains("Wait-Process -Id 7"));
         assert!(w.contains(&ps_quote(&target.join(EXE))));
         assert!(w.contains("Rom''s tools"));
-        assert!(w.contains(&format!("Remove-Item -LiteralPath {}", ps_quote(&work))));
+        let remove = format!("Remove-Item -LiteralPath {}", ps_quote(&work));
+        assert!(w.find(&remove).unwrap() < w.find("if ($failed)").unwrap(), "{w}");
+        assert_eq!(
+            ps_quote(Path::new("a'b\u{2018}c\u{2019}d\u{201a}e\u{201b}f")),
+            "'a''b\u{2018}\u{2018}c\u{2019}\u{2019}d\u{201a}\u{201a}e\u{201b}\u{201b}f'"
+        );
+    }
+
+    #[test]
+    fn windows_script_file_has_a_byte_order_mark() {
+        let p = std::env::temp_dir().join(format!("hubbridge_bom_{}.ps1", std::process::id()));
+        let target = Path::new("C:/Users/Роман/HubBridge");
+        let script = windows_script(&target.join("app"), target, 7);
+        write_ps_script(&p, &script).unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]), Some(script.as_bytes()));
+        assert!(script.contains("Роман"));
+    }
+
+    #[test]
+    fn a_failed_download_leaves_no_folder() {
+        let work = std::env::temp_dir().join(format!("hubbridge_prepare_{}", std::process::id()));
+        let garbage = |zip: &Path| std::fs::write(zip, b"abc").map_err(|e| e.to_string());
+        let sum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        assert_eq!(prepare(&work, sum, |_| Err("offline".into())).unwrap_err(), "offline");
+        assert!(!work.exists(), "after a failed download");
+        let err = prepare(&work, &"0".repeat(64), garbage).unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+        assert!(!work.exists(), "after a digest mismatch");
+        assert!(prepare(&work, sum, garbage).is_err());
+        assert!(!work.exists(), "after an unpack failure");
+    }
+
+    #[test]
+    fn discard_removes_only_a_download_folder() {
+        let root = std::env::temp_dir().join(format!("hubbridge_discard_{}", std::process::id()));
+        let work = root.join("HubBridge-update-0.2.0");
+        let source = work.join("app/HubBridge.app");
+        let other = root.join("other/HubBridge.app");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        discard(&other);
+        assert!(other.exists());
+        discard(&source);
+        assert!(!work.exists() && root.exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -514,12 +596,17 @@ mod tests {
 
         /// Runs the replace script with every `open` turned into a no-op.
         fn run_script(source: &Path, target: &Path) {
+            run_changed_script(source, target, |script| script);
+        }
+
+        /// `run_script` with a step of the script replaced, to make it fail.
+        fn run_changed_script(source: &Path, target: &Path, change: impl FnOnce(String) -> String) {
             let mut gone = command("/usr/bin/true").spawn().unwrap();
             let pid = gone.id();
             gone.wait().unwrap();
             let script = mac_script(source, target, pid).replace("open ", ": ");
             assert!(!script.contains("open "));
-            command("/bin/bash").arg("-c").arg(script).status().unwrap();
+            command("/bin/bash").arg("-c").arg(change(script)).status().unwrap();
         }
 
         fn bundle_with_marker(app: &Path, marker: &str) {
@@ -542,16 +629,74 @@ mod tests {
             assert!(!work.exists());
         }
 
+        fn replaced(script: &str, step: &str, with: &str) -> String {
+            assert_eq!(script.matches(step).count(), 1, "`{step}` in {script}");
+            script.replace(step, with)
+        }
+
+        #[test]
+        fn mac_script_removes_a_partly_moved_app() {
+            let tmp = TempDir::new("partial");
+            let work = tmp.0.join("HubBridge-update-0.2.0");
+            let source = work.join("app/HubBridge.app");
+            let target = tmp.0.join("Apps/HubBridge.app");
+            bundle_with_marker(&source, "new");
+            bundle_with_marker(&target, "old");
+            run_changed_script(&source, &target, |script| {
+                // As a move from another volume that stops halfway.
+                let step = format!("mv {} {}", sh_quote(&source), sh_quote(&target));
+                let partial = format!("{{ mkdir {t} && touch {t}/partial; false; }}", t = sh_quote(&target));
+                replaced(&script, &step, &partial)
+            });
+            assert!(target.join("old").is_file());
+            assert!(!target.join("partial").exists());
+            assert!(!tmp.0.join("Apps/HubBridge.app.old").exists());
+            assert!(!work.exists());
+        }
+
+        #[test]
+        fn mac_script_keeps_the_app_it_could_not_move_aside() {
+            let tmp = TempDir::new("aside");
+            let work = tmp.0.join("HubBridge-update-0.2.0");
+            let source = work.join("app/HubBridge.app");
+            let target = tmp.0.join("Apps/HubBridge.app");
+            let old = target.with_extension("app.old");
+            bundle_with_marker(&source, "new");
+            bundle_with_marker(&target, "old");
+            run_changed_script(&source, &target, |script| {
+                let step = format!("mv {} {}", sh_quote(&target), sh_quote(&old));
+                replaced(&script, &step, "false")
+            });
+            assert!(target.join("old").is_file());
+            assert!(!target.join("new").exists());
+            assert!(!work.exists());
+
+            // A leftover .app.old that cannot be removed: `mv` would put the app inside it.
+            bundle_with_marker(&source, "new");
+            bundle_with_marker(&old, "stale");
+            run_changed_script(&source, &target, |script| {
+                let step = format!("rm -rf {}\n", sh_quote(&old));
+                replaced(&script, &step, "")
+            });
+            assert!(target.join("old").is_file());
+            assert!(!old.join("HubBridge.app").exists());
+            assert!(!work.exists());
+        }
+
         #[test]
         fn mac_script_restores_the_old_app_when_the_swap_fails() {
             let tmp = TempDir::new("restore");
             // the new app is missing, so moving it into place fails
-            let source = tmp.0.join("HubBridge-update-0.2.0/app/HubBridge.app");
+            let work = tmp.0.join("HubBridge-update-0.2.0");
+            let source = work.join("app/HubBridge.app");
+            bundle_with_marker(&work.join("app/Other.app"), "left over");
             let target = tmp.0.join("Apps/HubBridge.app");
             bundle_with_marker(&target, "old");
             run_script(&source, &target);
             assert!(target.join("old").is_file());
             assert!(!tmp.0.join("Apps/HubBridge.app.old").exists());
+            assert!(!work.exists());
+            assert!(tmp.0.exists());
         }
     }
 }
