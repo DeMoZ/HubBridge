@@ -13,10 +13,11 @@ use hubbridge_host::mirror::session::require_new_app;
 use hubbridge_host::mirror::stats::Snapshot;
 use hubbridge_host::mirror::{self, MirrorHandle, MirrorOptions, MirrorSession, ScreenPermissionDenied};
 use hubbridge_host::{Client, ClientEvent};
-use hubbridge_proto::{AgentInfo, DisplayInfo, DisplayList};
+use hubbridge_proto::{AgentInfo, DisplayInfo, DisplayList, Message};
 use serde::Serialize;
 
 use super::{App, STARTING_WAIT, lock, short};
+use hubbridge_host::mirror::Ending;
 
 /// The only address the window opens in System Settings.
 const SCREEN_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
@@ -24,6 +25,78 @@ const SCREEN_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preferenc
 const STOP_LIMIT: Duration = Duration::from_secs(3);
 /// The busy key of a mirror that is starting.
 const BUSY: &str = "mirror";
+
+/// What takes the control session's events: the running mirror.
+pub(super) trait ControlListener {
+    fn on_control_event(&self, event: &ClientEvent);
+}
+
+impl ControlListener for MirrorHandle {
+    fn on_control_event(&self, event: &ClientEvent) {
+        MirrorHandle::on_control_event(self, event);
+    }
+}
+
+/// Where the one mirror of the window is. The phone may end a stream between its answer to
+/// the start and the moment the start returns here; what it says then is kept and handed to
+/// the mirror once there is one.
+pub(super) struct MirrorSlot<H = MirrorHandle> {
+    handle: Option<Arc<H>>,
+    /// `Some` while a start runs: the phone's `MirrorStopped` events of that time.
+    early: Option<Vec<ClientEvent>>,
+}
+
+impl<H> Default for MirrorSlot<H> {
+    fn default() -> Self {
+        MirrorSlot {
+            handle: None,
+            early: None,
+        }
+    }
+}
+
+impl<H: ControlListener> MirrorSlot<H> {
+    pub(super) fn handle(&self) -> Option<&Arc<H>> {
+        self.handle.as_ref()
+    }
+
+    pub(super) fn take(&mut self) -> Option<Arc<H>> {
+        self.handle.take()
+    }
+
+    /// Call before the phone is asked to start.
+    fn starting(&mut self) {
+        self.early = Some(Vec::new());
+    }
+
+    fn tell(&mut self, event: &ClientEvent) {
+        if let Some(handle) = &self.handle {
+            handle.on_control_event(event);
+        } else if let Some(early) = &mut self.early
+            && matches!(event, ClientEvent::Message(Message::MirrorStopped { .. }))
+        {
+            early.push(event.clone());
+        }
+    }
+
+    /// The start returned a mirror. It picks out its own stream from what was kept.
+    fn started(&mut self, handle: Arc<H>) {
+        for event in self.early.take().unwrap_or_default() {
+            handle.on_control_event(&event);
+        }
+        self.handle = Some(handle);
+    }
+
+    /// The start failed: the phone's own reason, if it gave one meanwhile.
+    fn start_failed(&mut self) -> Option<String> {
+        match self.early.take()?.pop()? {
+            ClientEvent::Message(Message::MirrorStopped { reason, message, .. }) => {
+                Some(Ending::from_phone(reason, &message).reason)
+            }
+            _ => None,
+        }
+    }
+}
 
 /// The phone's displays, while connected.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -125,7 +198,7 @@ impl App {
         // Checked and claimed under one lock: two quick presses must not start two mirrors.
         let (mut taken, mut claimed) = (false, false);
         self.update(|m| {
-            taken = m.busy.contains(BUSY) || lock(&self.mirror).is_some();
+            taken = m.busy.contains(BUSY) || lock(&self.mirror).handle().is_some();
             claimed = !taken && m.begin_action(BUSY);
         });
         if !claimed {
@@ -181,6 +254,7 @@ impl App {
             fps,
             bitrate_kbps: None,
         };
+        lock(&self.mirror).starting();
         let started = {
             let mut store = self.store.lock().await;
             MirrorSession::start(&client, &mut store, display_id, options, source).await
@@ -189,12 +263,15 @@ impl App {
         drop(client);
         let handle = match started {
             Ok(h) => Arc::new(h),
-            Err(e) => return self.mirror_failed_to_start(short(&e)),
+            Err(e) => {
+                let reason = lock(&self.mirror).start_failed();
+                return self.mirror_failed_to_start(reason.unwrap_or_else(|| short(&e)));
+            }
         };
         let cancelled = {
             let mut slot = lock(&self.mirror);
             if self.mirror_generation.load(Ordering::SeqCst) == generation {
-                *slot = Some(Arc::clone(&handle));
+                slot.started(Arc::clone(&handle));
                 false
             } else {
                 true
@@ -207,7 +284,7 @@ impl App {
         let config = handle.config();
         self.update(|m| {
             // A Stop or a disconnect may have taken the mirror out just now.
-            if lock(&self.mirror).as_ref().is_some_and(|h| Arc::ptr_eq(h, &handle)) {
+            if lock(&self.mirror).handle().is_some_and(|h| Arc::ptr_eq(h, &handle)) {
                 m.mirror.state = MirrorState::Running;
                 m.mirror.display_name = Some(handle.display().name.clone());
                 m.mirror.size = Some(format!("{}×{}", config.width, config.height));
@@ -243,9 +320,9 @@ impl App {
         // Whoever took it out of the slot (Stop, a disconnect) has the say about the view.
         let mine = {
             let mut slot = lock(&self.mirror);
-            let mine = slot.as_ref().is_some_and(|h| Arc::ptr_eq(h, &handle));
+            let mine = slot.handle().is_some_and(|h| Arc::ptr_eq(h, &handle));
             if mine {
-                *slot = None;
+                slot.take();
             }
             mine
         };
@@ -262,10 +339,7 @@ impl App {
 
     /// Passes what concerns the mirror from the control session to it.
     pub(super) fn tell_mirror(&self, event: &ClientEvent) {
-        let handle = lock(&self.mirror).clone();
-        if let Some(h) = handle {
-            h.on_control_event(event);
-        }
+        lock(&self.mirror).tell(event);
     }
 
     /// Take the mirror out and cancel one that is starting. The view is idle, or says
@@ -322,6 +396,54 @@ impl App {
 mod tests {
     use super::super::{Model, Request, update_blocked};
     use super::*;
+
+    /// Remembers what it was told.
+    #[derive(Default)]
+    struct Told(std::sync::Mutex<Vec<ClientEvent>>);
+
+    impl ControlListener for Told {
+        fn on_control_event(&self, event: &ClientEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    fn stopped(stream_id: u64) -> ClientEvent {
+        ClientEvent::Message(Message::MirrorStopped {
+            stream_id,
+            reason: hubbridge_proto::MirrorEnd::DisplayRemoved,
+            message: "the monitor was disconnected".into(),
+        })
+    }
+
+    #[test]
+    fn a_reason_that_arrives_while_starting_reaches_the_mirror() {
+        let mut slot: MirrorSlot<Told> = MirrorSlot::default();
+        // Nothing is starting: nobody to keep it for.
+        slot.tell(&stopped(1));
+        slot.starting();
+        slot.tell(&stopped(2));
+        slot.tell(&ClientEvent::Message(Message::Done));
+        let handle = Arc::new(Told::default());
+        slot.started(Arc::clone(&handle));
+        assert_eq!(format!("{:?}", handle.0.lock().unwrap()), format!("{:?}", [stopped(2)]));
+        // From then on it hears at once.
+        slot.tell(&stopped(3));
+        assert_eq!(handle.0.lock().unwrap().len(), 2);
+        assert!(slot.take().is_some() && slot.handle().is_none());
+    }
+
+    #[test]
+    fn a_failed_start_shows_the_reason_the_phone_gave_meanwhile() {
+        let mut slot: MirrorSlot<Told> = MirrorSlot::default();
+        slot.starting();
+        assert_eq!(slot.start_failed(), None);
+        slot.starting();
+        slot.tell(&stopped(4));
+        assert_eq!(slot.start_failed().as_deref(), Some("the monitor was disconnected"));
+        // Nothing is left for the next start.
+        slot.starting();
+        assert_eq!(slot.start_failed(), None);
+    }
 
     #[test]
     fn mirror_requests_deserialize() {

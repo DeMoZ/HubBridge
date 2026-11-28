@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use hubbridge_host::discovery::{Browser, DiscoveredAgent};
 use hubbridge_host::install::{self, InstallOptions};
-use hubbridge_host::mirror::MirrorHandle;
 use hubbridge_host::serial::bridge::{BridgeHandle, BridgeOptions, SerialBridge};
 use hubbridge_host::serial::{self, Flow, Line, SerialConfig};
 use hubbridge_host::{Client, ClientEvent, Store, adb};
@@ -25,7 +24,7 @@ use tokio::task::JoinHandle;
 use crate::{donations, net, update};
 
 mod mirroring;
-use mirroring::{DisplaysView, MirrorView};
+use mirroring::{DisplaysView, MirrorSlot, MirrorView};
 
 /// Sends a script to the page (the window lives on the main thread).
 pub type Push = Arc<dyn Fn(String) + Send + Sync>;
@@ -586,7 +585,7 @@ pub struct App {
     /// Devices whose bridge is being started (the id is taken before the first await).
     starting: Mutex<BTreeSet<u32>>,
     /// The running mirror.
-    mirror: Mutex<Option<Arc<MirrorHandle>>>,
+    mirror: Mutex<MirrorSlot>,
     /// Grows when a mirror is stopped from outside; a start made before is then dropped.
     mirror_generation: AtomicU64,
     exit: Exit,
@@ -683,7 +682,7 @@ impl App {
             browser: Mutex::new(None),
             bridges: Mutex::new(HashMap::new()),
             starting: Mutex::new(BTreeSet::new()),
-            mirror: Mutex::new(None),
+            mirror: Mutex::new(MirrorSlot::default()),
             mirror_generation: AtomicU64::new(0),
             exit,
             release: Mutex::new(None),

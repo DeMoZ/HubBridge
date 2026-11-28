@@ -28,7 +28,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Something the agent sent on its own, or the end of the connection.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ClientEvent {
     Message(Message),
     Disconnected(String),
