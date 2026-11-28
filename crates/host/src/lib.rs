@@ -9,6 +9,7 @@ pub mod client;
 pub mod discovery;
 pub mod format;
 pub mod install;
+pub mod mirror;
 pub mod msc;
 pub mod serial;
 pub mod store;
