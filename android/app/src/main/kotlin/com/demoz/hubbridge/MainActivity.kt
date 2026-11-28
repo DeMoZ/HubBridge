@@ -125,12 +125,11 @@ class MainActivity : Activity() {
             } else {
                 append("Listening on 127.0.0.1:$port — reach it with `hubbridge adb`.\n")
             }
-            val sessions = st?.optJSONArray("sessions")
-            if (sessions == null || sessions.length() == 0) {
+            val sessions = BridgeService.computers(st)
+            if (sessions.isEmpty()) {
                 append("No computer connected.")
             } else {
-                for (i in 0 until sessions.length()) {
-                    val s = sessions.getJSONObject(i)
+                for (s in sessions) {
                     val via = if (s.optBoolean("via_adb")) "ADB" else s.optString("peer")
                     append("Connected: ${s.optString("host_name")} ($via)\n")
                 }

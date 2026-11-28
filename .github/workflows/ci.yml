@@ -49,9 +49,9 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.2.12479018" > /dev/null
           cargo install cargo-ndk --locked
-      - name: Build debug APK
+      - name: Build debug APK and run the JVM tests
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug testDebugUnitTest --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: hubbridge-debug-apk

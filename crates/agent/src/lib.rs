@@ -11,23 +11,27 @@ pub mod fake;
 #[cfg(target_os = "android")]
 pub mod nusb_backend;
 pub mod usb;
+pub mod video;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use hubbridge_link::{LinkError, Secret, ServerDecision, server_handshake, server_read_hello};
-use hubbridge_proto::{AgentInfo, ErrorCode, Frame, HelloError, Intent, Message, PROTO_VERSION, UsbDeviceInfo};
+use hubbridge_proto::{
+    AgentInfo, DisplayList, ErrorCode, Frame, HelloError, Intent, Message, PROTO_VERSION, UsbDeviceInfo,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 use usb::{BoxFut, UsbBackend, UsbDevice, UsbError, timeout_from_ms};
+use video::{Attachment, Stream, VideoSink};
 
 /// How long a PIN shown on the phone stays valid.
 pub const PAIRING_TTL: Duration = Duration::from_secs(120);
@@ -67,6 +71,8 @@ pub struct SessionStatus {
     /// Came from 127.0.0.1 on the phone: an `adb forward` connection.
     pub via_adb: bool,
     pub connected_at_ms: u64,
+    /// The video connection of a mirror, not another computer.
+    pub media: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,6 +127,13 @@ struct Inner {
     usb: RwLock<Option<Arc<dyn UsbBackend>>>,
     /// Devices open for a session: device id → owner.
     open: Mutex<HashMap<u32, OpenDev>>,
+    displays: RwLock<DisplayList>,
+    sink: RwLock<Option<Arc<dyn VideoSink>>>,
+    /// Mirror streams by id.
+    streams: Mutex<HashMap<u64, Stream>>,
+    /// The reply channel of every control session, for events meant for one of them.
+    outboxes: Mutex<HashMap<u64, mpsc::UnboundedSender<Frame>>>,
+    phone_locked: AtomicBool,
 }
 
 struct OpenDev {
@@ -202,6 +215,11 @@ impl Agent {
                 shutdown,
                 usb: RwLock::new(None),
                 open: Mutex::new(HashMap::new()),
+                displays: RwLock::new(DisplayList::default()),
+                sink: RwLock::new(None),
+                streams: Mutex::new(HashMap::new()),
+                outboxes: Mutex::new(HashMap::new()),
+                phone_locked: AtomicBool::new(false),
             }),
         })
     }
@@ -348,6 +366,8 @@ impl Agent {
 
     /// Stop accepting and close all sessions.
     pub fn shutdown(&self) {
+        // First, so that the owners can still be told why.
+        self.end_all_streams();
         let _ = self.inner.shutdown.send(true);
     }
 
@@ -478,12 +498,15 @@ impl Agent {
                 peer: peer.to_string(),
                 via_adb: peer.ip().is_loopback(),
                 connected_at_ms: now_ms(),
+                media: false,
             },
         );
         self.notify_status();
         info!(%peer, host = %host_name, session = sid, "session open");
 
         let res = self.run_session(sid, session.sender, session.receiver).await;
+        self.inner.outboxes.lock().unwrap().remove(&sid);
+        self.end_streams_of(sid);
 
         let mine: Vec<u32> = self
             .inner
@@ -530,10 +553,19 @@ impl Agent {
         // USB requests finish later; their answers come back through this channel.
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
         let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+        self.inner.outboxes.lock().unwrap().insert(sid, out_tx.clone());
+        let mut first = true;
+        // The session asked for the displays, so it knows the display messages.
+        let mut displays_aware = false;
+        let mut media: Option<Attachment> = None;
 
         let result = loop {
             tokio::select! {
                 _ = stopped(&mut stop) => {
+                    // What is already queued (why a mirror ended) goes out first.
+                    while let Ok(queued) = out_rx.try_recv() {
+                        let _ = tx.send(&queued).await;
+                    }
                     let _ = tx.send(&Frame { req: 0, msg: Message::Bye }).await;
                     break Ok(());
                 }
@@ -544,6 +576,23 @@ impl Agent {
                         Ok(Some(Err(e))) => break Err(e),
                         Ok(Some(Ok(f))) => f,
                     };
+                    // A session whose first request is `MirrorAttach` becomes a video session.
+                    if std::mem::take(&mut first)
+                        && let Message::MirrorAttach { stream_id } = frame.msg
+                    {
+                        match self.attach_session(sid, stream_id) {
+                            Ok(attachment) => {
+                                tx.send(&Frame { req: frame.req, msg: Message::Done }).await?;
+                                media = Some(attachment);
+                                break Ok(());
+                            }
+                            Err(msg) => {
+                                tx.send(&Frame { req: frame.req, msg }).await?;
+                                continue;
+                            }
+                        }
+                    }
+                    displays_aware |= matches!(frame.msg, Message::GetDisplays);
                     match self.dispatch(sid, frame) {
                         Dispatch::Reply(reply) => tx.send(&reply).await?,
                         Dispatch::Later(req, fut) => {
@@ -555,7 +604,7 @@ impl Agent {
                                 let msg = match tokio::spawn(fut).await {
                                     Ok(m) => m,
                                     Err(e) => {
-                                        warn!("USB request failed inside the agent: {e}");
+                                        warn!("a request failed inside the agent: {e}");
                                         Message::Error { code: ErrorCode::Internal, message: format!("agent error: {e}") }
                                     }
                                 };
@@ -569,18 +618,53 @@ impl Agent {
                 Some(done) = out_rx.recv() => tx.send(&done).await?,
                 ev = events.recv() => {
                     let msg = match ev {
+                        // Hosts that never asked would not understand it.
+                        Ok(Message::DisplaysChanged(_)) if !displays_aware => continue,
                         Ok(m) => m,
-                        // Fell behind: resend the whole list.
-                        Err(broadcast::error::RecvError::Lagged(_)) => Message::DeviceList { devices: self.devices() },
+                        // Fell behind: resend the whole lists.
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if displays_aware {
+                                let list = Message::DisplaysChanged(self.displays());
+                                tx.send(&Frame { req: 0, msg: list }).await?;
+                            }
+                            Message::DeviceList { devices: self.devices() }
+                        }
                         Err(broadcast::error::RecvError::Closed) => break Ok(()),
                     };
                     tx.send(&Frame { req: 0, msg }).await?;
                 }
             }
         };
+        let result = match media {
+            Some(attachment) if result.is_ok() => {
+                // A video session gets no events: stop collecting them.
+                drop(events);
+                self.inner.outboxes.lock().unwrap().remove(&sid);
+                self.run_media(attachment, &mut tx, &mut in_rx, stop).await
+            }
+            _ => result,
+        };
         reader.abort();
         tx.shutdown().await;
         result
+    }
+
+    /// `MirrorAttach` as the first request of session `sid`.
+    // The error is the reply itself.
+    #[allow(clippy::result_large_err)]
+    fn attach_session(&self, sid: u64, stream: u64) -> Result<Attachment, Message> {
+        let Some(host_id) = self.inner.sessions.lock().unwrap().get(&sid).map(|s| s.host_id.clone()) else {
+            return Err(Message::Error {
+                code: ErrorCode::Internal,
+                message: "unknown session".into(),
+            });
+        };
+        let attachment = self.attach(&host_id, stream)?;
+        if let Some(s) = self.inner.sessions.lock().unwrap().get_mut(&sid) {
+            s.media = true;
+        }
+        self.notify_status();
+        Ok(attachment)
     }
 
     /// Answer one request now, or queue it (USB) and answer when it completes.
@@ -619,6 +703,16 @@ impl Agent {
                     }
                 }
             }
+            Message::GetDisplays => Message::Displays(self.displays()),
+            Message::MirrorStart { display_id, config } => match self.mirror_start(sid, display_id, config) {
+                Ok(start) => return Dispatch::Later(req, Box::pin(start)),
+                Err(refused) => refused,
+            },
+            Message::MirrorStop { stream_id } => self.mirror_stop(sid, stream_id),
+            Message::MirrorAttach { .. } => Message::Error {
+                code: ErrorCode::Unsupported,
+                message: "a video stream is attached by the first request of a new session".into(),
+            },
             Message::Bye => return Dispatch::Bye,
             other => Message::Error {
                 code: ErrorCode::Unsupported,

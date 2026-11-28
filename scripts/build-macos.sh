@@ -16,6 +16,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 target=aarch64-apple-darwin
+# The oldest macOS the app and the CLI run on; LSMinimumSystemVersion below uses it too.
+export MACOSX_DEPLOYMENT_TARGET=13.0
 version=$(scripts/version.sh)
 app=dist/HubBridge.app
 cli=dist/cli
@@ -76,7 +78,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>$MACOSX_DEPLOYMENT_TARGET</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>CFBundleDevelopmentRegion</key><string>en</string>

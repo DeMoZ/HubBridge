@@ -58,6 +58,19 @@ Limits and gotchas:
   DeX models, recent Pixels, some Motorola/Xiaomi/ASUS) or with DisplayLink hubs (through
   DisplayLink's own app). Some phones only mirror, which leaves no secondary display for the
   `Presentation` API.
+- **Measured on a Samsung SM-G970F (Android 12), 2026-11-28**, monitor on the USB-C port and through a
+  charging USB-C hub, picture drawn by a `Presentation` from HubBridge's foreground service:
+  - **Samsung DeX must be off.** With DeX on, the monitor keeps showing the DeX desktop although the app's
+    window on the HDMI display is created and drawing; Android reports no error.
+  - With DeX off the picture stays while HubBridge is in the background or another app is in front.
+  - **The phone must be unlocked with its screen on.** The power button locks the phone and turns the monitor
+    dark; after screen on and unlock the picture comes back by itself. A lock screen with the screen on, and
+    the same with DeX on, were not tested.
+  - Turning DeX off or replugging the monitor brings the display back under a **new display id** and cancels
+    the app's window: the picture has to be started again.
+  - The monitor reported 1280×720@60 while DeX was on and 2560×1600@60 without it (the same monitor, with and
+    without the hub).
+  - H.264 decoder: `OMX.Exynos.avc.dec`, which reports `FEATURE_LowLatency`.
 - **iOS is out of scope**: no general USB host API (only MFi accessories / ExternalAccessory).
 
 ## 3. Network
@@ -129,7 +142,7 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 | Keyboard / mouse | `SendInput`, no driver | `CGEvent`, Accessibility permission |
 | Generic HID / gamepad | VHF (KMDF driver, signing) / ViGEm-style bus driver | HIDDriverKit dext: DriverKit entitlements from Apple + user approval in System Settings |
 | Virtual monitor | **IddCx** UMDF driver: test-signing for development, attestation signing for distribution; signed open-source options exist (Virtual Display Driver, Parsec VDD) | `CGVirtualDisplay` — **private API** (no App Store, may break with OS updates); no public alternative |
-| Screen capture | Windows.Graphics.Capture / Desktop Duplication, no driver | ScreenCaptureKit, Screen Recording permission |
+| Screen capture | Windows.Graphics.Capture / Desktop Duplication, no driver (not built: mirroring needs macOS for now) | ScreenCaptureKit, "Screen & System Audio Recording" permission (§5) |
 | Webcam from the phone | **Windows 11 `MFCreateVirtualCamera`**, no driver (Windows 10: DirectShow filter only) | CoreMediaIO **Camera Extension**: system extension, Developer ID + notarization, user approval |
 
 ### Serial front ends: what a PTY can and cannot do
@@ -167,6 +180,8 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
 
 ## 5. Released builds
 
+- **The macOS app and CLI need macOS 13 or later** (Apple Silicon). v0.1.0 was built for
+  macOS 11 or later.
 - **The macOS app is not notarized.** It is signed ad hoc (no Apple Developer ID), so a
   downloaded copy is stopped on its first start ("Not Opened", "Apple could not verify…") until
   you press **Open Anyway** in System Settings → Privacy & Security, or remove the quarantine
@@ -174,6 +189,21 @@ desktop, over the generic USB transfers (the phone runs no chip code). What that
   same way.
 - **macOS may ask for Local Network access again after an update**: an ad-hoc signed app has no
   stable signing identity. Not yet checked with a real update.
+- **Screen mirroring needs the "Screen & System Audio Recording" permission** (System
+  Settings → Privacy & Security). What to expect:
+  - HubBridge asks macOS once per run, the first time you press Mirror; macOS shows its own
+    prompt only the first time ever.
+  - After allowing it, **quit and reopen** the app: the running one usually still sees the old
+    answer (macOS offers "Quit & Reopen").
+  - The app is signed ad hoc, so it has no stable identity: **every update or new build loses
+    the permission** and must be allowed again. An old HubBridge entry in the list may have to
+    be removed with "−" first. Developer ID signing (roadmap) is the real fix.
+  - macOS 15 and later ask again about once a month.
+  - For development, a binary started from Terminal or Orca is covered by **that app's**
+    permission, not by HubBridge's.
+- **A mirror cannot start while the Mac's screen is locked and its display is off**: macOS
+  offers no display to capture (seen on macOS 27). What a running mirror does when the Mac locks
+  was not tested.
 - **adb after quitting the app:** an adb server started by the packaged app may lose local
   network access once the app quits (ADB over Wi-Fi stops working until the adb server is
   restarted, for example with `adb kill-server`). Spawning it "disclaimed" is on the roadmap.

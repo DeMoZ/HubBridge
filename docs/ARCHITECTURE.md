@@ -46,9 +46,29 @@ flowchart LR
 |---|---|---|
 | `MainActivity` | Kotlin | Start/stop, Wi-Fi+ADB or ADB-only mode, PIN for pairing, device list, paired computers. Receives `USB_DEVICE_ATTACHED` so the user can tick "always open HubBridge" (persistent per-device permission). |
 | `BridgeService` | Kotlin | Foreground service of type `connectedDevice` with an ongoing notification. Holds a partial wake lock and a `WIFI_MODE_FULL_LOW_LATENCY` lock, registers `_hubbridge._tcp` with `NsdManager`, listens for attach/detach/permission broadcasts, asks for USB permission when a host requests it. |
+| `DisplayWatcher` | Kotlin | Presentation displays (monitors on the USB-C port or hub) and the Samsung DeX flag as JSON, on every `DisplayListener` event. |
+| `MirrorOutput`, `MirrorPresentation`, `MirrorDecoder` | Kotlin | The video output of a mirror: a `Presentation` on the monitor opened by the service (needs DeX off) with a surface of the stream's shape between black bars, and a `MediaCodec` H.264 decoder in low-latency mode rendering the newest picture. A window that Android cancels while the monitor is still there (a mode change) is opened again, with a new decoder, a limited number of times. Start refusals, lost surfaces and decoder errors go back to the agent. |
 | `UsbScanner` | Kotlin | Builds the device list from `UsbManager`: ids, class, configurations, interfaces, endpoints; with permission also the serial and the raw descriptors (`UsbDeviceConnection.getRawDescriptors()`). |
-| `NativeAgent` / `crates/android` | Kotlin ↔ Rust (JNI) | Thin JSON bridge; Rust calls back `onPermissionRequested` / `onStatusChanged`. |
-| `crates/agent` | Rust | TCP server (dual-stack `[::]` in LAN mode, `127.0.0.1` in ADB-only mode), pairing window (6-digit PIN, 120 s, 3 attempts), paired hosts store, sessions, device registry with diff → `DeviceAdded`/`DeviceRemoved` events, idle timeout. |
+| `NativeAgent` / `crates/android` | Kotlin ↔ Rust (JNI) | Thin JSON bridge; Rust calls back `onPermissionRequested` / `onStatusChanged`, USB open/close, and for mirrors `onMirrorStart` / `onVideoFrame` / `onMirrorStats` / `onMirrorStop` (the video output behind the agent's `VideoSink`). |
+| `crates/agent` | Rust | TCP server (dual-stack `[::]` in LAN mode, `127.0.0.1` in ADB-only mode), pairing window (6-digit PIN, 120 s, 3 attempts), paired hosts store, sessions, device registry with diff → `DeviceAdded`/`DeviceRemoved` events, idle timeout; phone displays and mirroring (below). |
+
+**Displays and mirroring in `crates/agent`** (`video.rs`; messages in [PROTOCOL.md](PROTOCOL.md)):
+
+- `Agent::set_displays` takes the platform's presentation displays; a changed list goes as
+  `DisplaysChanged` only to sessions that sent `GetDisplays`.
+- The platform's video output is the `VideoSink` trait (`start`, `frame`, `stats`, `stop`; only
+  called from threads that may block); `fake::FakeVideoSink` checks the H.264 stream for the
+  simulator and the tests. The platform reports back with `mirror_failed`, `request_keyframe` and
+  `set_phone_locked`.
+- Stream registry: one stream per display, bound to the control session and host id that started
+  it. A media session is a second resumed session whose first request is `MirrorAttach`
+  (`media: true` in the status JSON, so the phone does not count it as a computer). Its frames go
+  to a sink thread through a queue of three; it sends acknowledgements, keyframe requests and a
+  status every second.
+- A stream ends exactly once (stop request, display removed, video session lost, not attached
+  within 5 s, decoder stalled for 2 s or failed, the platform's report, the control session
+  ending, agent shutdown): the sink is stopped, the owner gets `MirrorStopped` when the phone
+  side ended it, and the media session closes.
 
 Why the core is in Rust and not Kotlin: one implementation of the protocol and crypto
 for both ends; and from step 2 the hot path (USB transfers) runs in Rust directly on the
@@ -70,7 +90,11 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - Key store `host.json` in the user config dir, owner-only permissions (Keychain /
   Credential Manager in step 4).
 - Step 1 front end is the `hubbridge` CLI (`discover`, `pair`, `info`, `devices`, `grant`,
-  `ping`, `watch`, `adb`, `agents`, `forget`). Step 4 adds a tray app on tao + wry +
+  `ping`, `watch`, `adb`, `agents`, `forget`, `usb`, `serial`, `displays`, `mirror`).
+- `mirror/`: the screen mirror. `fit` (stream size), `pace` (at most two frames unacknowledged,
+  latest picture wins, keyframe rules), `stats`, `annexb`, `session` (the second connection),
+  frame sources (`macos/`: ScreenCaptureKit + VideoToolbox; `test_pattern`: a built-in clip;
+  `synthetic`: fake frames for tests) and `cli` (the two commands). Step 4 adds a tray app on tao + wry +
   tray-icon (same stack as UsbMemoryChecker / 360Cleaner), talking to the same library.
 - Targets macOS and Windows (the phone side is Android). There is no Linux platform.
 
@@ -103,6 +127,24 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
   config folder (or in `HUBBRIDGE_HOME`); the update download (`HubBridge-update-<version>`,
   removed after the install or when it fails) and the replace script (`HubBridge-update.sh` /
   `.ps1`) are in the system temp folder.
+- **Phone displays and mirroring** (`app/mirroring.rs`): the right column shows "Phone displays"
+  between the connection and the USB devices. `Model.displays` (`DisplaysView`: `supported`, the
+  list, the DeX flag) is filled after a connect, only when the phone app passes the version gate, and
+  follows `DisplaysChanged`. `Model.mirror` is a `MirrorView` (`idle | starting | running | stopped |
+  failed`, display, stream size, fps, the readout, the reason, `phone_locked`, and `permission`, a
+  counter that makes the page open the Screen Recording sheet when it grows). Requests:
+  `mirror_start {display_id, fps}`, `mirror_stop`, `open_screen_settings`. The last one opens only
+  the fixed address `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`
+  with `/usr/bin/open`; the page cannot pass another. A start checks the Screen Recording permission
+  first; "mirror" is a busy key that is refused once the app closes for an update, and an update waits
+  for a start in progress like for a starting bridge. The readout reaches the model once a second.
+  A disconnect, a quit (`LoopDestroyed`) and an update stop the mirror before the session closes; a
+  lost connection ends it with its reason, and a reconnect does not start it again. One mirror at a
+  time. Capture and encoder callbacks run on their own queues and never touch the WebView. On
+  Windows the panel lists the displays and says that mirroring needs macOS for now.
+- In a checkout on a case-insensitive disk (the macOS default) `target/debug/hubbridge` (CLI) and
+  `target/debug/HubBridge` (window) are one file: the package built last wins. Build the one you are
+  about to run (`cargo run -p hubbridge-host -- …` / `cargo run -p hubbridge-desktop`).
 - Updating works only in a release build that runs from `HubBridge.app` (or the `.exe` folder on
   Windows). It is refused while the phone app is being installed or a pairing runs. After the last
   such check no APK install, pairing or bridge start can begin; bridges still starting are waited
@@ -176,9 +218,12 @@ Java `UsbDeviceConnection` API does not offer at all, without a JNI hop per pack
 - **Security:** PIN pairing with SPAKE2 (no offline brute force of the 6-digit PIN), then
   per-session Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s` with the long-term key — mutual
   authentication, encryption, forward secrecy. Details in [PROTOCOL.md](PROTOCOL.md).
-- **Video (step 3):** a second connection. Over Wi-Fi/LAN: QUIC (quinn) with unreliable
-  datagrams for frames, so a lost packet costs one frame, not a head-of-line stall. Over
-  `adb forward`: the same frames on a second TCP stream. Control stays on the first stream.
+- **Video (step 3):** a second TCP connection to the same port, an ordinary resumed session
+  that attaches itself to a mirror stream, for Wi-Fi/LAN and `adb forward` alike. A large
+  frame never waits in front of a ping or a USB reply, there is one code path and no second
+  encryption stack. A stall on Wi-Fi stops the picture; the two-frame acknowledgement window
+  keeps the delay from growing. QUIC with unreliable datagrams (a lost packet would cost one
+  frame, not a stall) stays a later option if measurements call for it.
   WebRTC is not needed: there is no NAT to traverse on a LAN, and its stack is heavy.
 
 ## Repository layout
@@ -193,8 +238,10 @@ HubBridge/
 │   ├── android/               JNI cdylib libhubbridge_android.so (built with cargo-ndk)
 │   ├── agent-sim/             desktop agent with fake devices (CP210x/FTDI/CH340/CDC-ACM UARTs, keyboard, flash drive)
 │   ├── host/                  desktop library + `hubbridge` CLI, e2e tests
+│   │   └── src/mirror/        screen mirroring: fit, Annex B, pacing, stats, session, frame sources
 │   └── desktop/               desktop window `HubBridge` (tao + wry): phones, pairing, adb, devices
-│       ├── src/               app.rs (controller), net.rs, update.rs, donations.rs, ui/index.html
+│       ├── src/               app.rs (controller), app/mirroring.rs, net.rs, update.rs, donations.rs,
+│       │                      ui/index.html
 │       └── assets/            app icon: icon.png (1024), AppIcon.icns (made by scripts/make-icon.sh);
 │                              donations.json: built-in copy of the Support list
 ├── android/                   Gradle project (AGP 9, Kotlin, no AndroidX)
@@ -202,6 +249,8 @@ HubBridge/
 │       ├── MainActivity.kt    UI
 │       ├── BridgeService.kt   foreground service, locks, NSD, USB events
 │       ├── UsbScanner.kt      UsbManager → JSON
+│       ├── DisplayWatcher.kt  presentation displays → JSON
+│       ├── Mirror*.kt         video output on the monitor: window, decoder, running streams
 │       ├── NsdAdvertiser.kt   _hubbridge._tcp
 │       └── NativeAgent.kt     JNI declarations
 ├── scripts/                   make-icon.sh / make-icon.swift: redraw the app icon (macOS);
@@ -216,6 +265,6 @@ HubBridge/
 Releases (version, signing, files) are described in [RELEASING.md](RELEASING.md).
 
 Planned additions: `crates/usbio` (usbfs URB engine on Android, step 2), `crates/usbip`
-(USB/IP codec + localhost server, step 2), `crates/video` (framing, pacing, stats, step 3),
+(USB/IP codec + localhost server, step 2),
 `os/windows/idd` and `os/macos/` (driver/extension
 projects, step 3).

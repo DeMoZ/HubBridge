@@ -1,5 +1,6 @@
 package com.demoz.hubbridge
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,6 +12,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.net.wifi.WifiManager
@@ -37,11 +39,23 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     private val io = Executors.newSingleThreadExecutor()
     private lateinit var scanner: UsbScanner
     private lateinit var nsd: NsdAdvertiser
+    private lateinit var displayWatcher: DisplayWatcher
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var running = false
+    private lateinit var mirrorOutput: MirrorOutput
     /** Connections opened for hosts, by device id. */
     private val connections = ConcurrentHashMap<Int, UsbDeviceConnection>()
+
+    /** Under the lock screen, and with the screen off, the monitor shows no picture. */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val locked = intent.action == Intent.ACTION_SCREEN_OFF || isLocked()
+            if (running) NativeAgent.setPhoneLocked(locked && intent.action != Intent.ACTION_USER_PRESENT)
+        }
+    }
+
+    private fun isLocked(): Boolean = getSystemService(KeyguardManager::class.java).isKeyguardLocked
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -57,17 +71,27 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         instance = this
         scanner = UsbScanner(this)
         nsd = NsdAdvertiser(this)
+        displayWatcher = DisplayWatcher(this) { json -> if (running) NativeAgent.setDisplays(json) }
+        mirrorOutput = MirrorOutput(this) { main.post { notifyChanged() } }
         createChannel()
         val filter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(ACTION_USB_PERMISSION)
         }
+        val screen = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(screenReceiver, screen, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(usbReceiver, filter)
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(screenReceiver, screen)
         }
     }
 
@@ -132,6 +156,9 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         lastError = ""
         acquireLocks()
         pushDevices()
+        displayWatcher.start()
+        val power = getSystemService(PowerManager::class.java)
+        NativeAgent.setPhoneLocked(!power.isInteractive || isLocked())
         if (lan) {
             val id = try { JSONObject(NativeAgent.status()).getString("agent_id") } catch (_: Exception) { "" }
             nsd.register(p, id, name)
@@ -139,6 +166,12 @@ class BridgeService : Service(), NativeAgent.Callbacks {
             nsd.unregister()
         }
         notifyChanged()
+    }
+
+    /** Samsung DeX can change the configuration without a display event. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        displayWatcher.push()
     }
 
     private fun acquireLocks() {
@@ -212,6 +245,16 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         pushDevices()
     }
 
+    override fun onMirrorStart(streamId: Long, displayId: Int, width: Int, height: Int, fps: Int): Int =
+        mirrorOutput.start(streamId, displayId, width, height)
+
+    override fun onVideoFrame(streamId: Long, data: ByteArray, ptsUs: Long, flags: Int): Int =
+        mirrorOutput.frame(streamId, data, ptsUs, flags)
+
+    override fun onMirrorStats(streamId: Long): String = mirrorOutput.stats(streamId)
+
+    override fun onMirrorStop(streamId: Long) = mirrorOutput.stop(streamId)
+
     // --- UI / notification ---------------------------------------------------------------
 
     private fun notifyChanged() {
@@ -228,11 +271,17 @@ class BridgeService : Service(), NativeAgent.Callbacks {
 
     private fun buildNotification(): Notification {
         val st = statusOrNull()
-        val sessions = st?.optJSONArray("sessions")?.length() ?: 0
+        val sessions = computers(st).size
+        val computersText = "Connected to $sessions computer" + if (sessions > 1) "s" else ""
+        // A mirror's video connection names the computer whose screen is shown.
+        val mirrorHost = sessions(st).firstOrNull { it.optBoolean("media") }?.optString("host_name")
+        val shownOn = mirrorOutput.shownOn
+        val mirroring = if (mirrorHost != null && shownOn != null) "Showing $mirrorHost's screen on $shownOn" else null
         val devices = st?.optInt("devices") ?: 0
         val title = when {
             pin.isNotEmpty() && st?.optBoolean("pairing_active") == true -> "Pairing PIN: $pin"
-            sessions > 0 -> "Connected to $sessions computer" + if (sessions > 1) "s" else ""
+            mirroring != null -> mirroring
+            sessions > 0 -> computersText
             else -> "Waiting for a computer"
         }
         val mode = if (lanMode) "Wi-Fi/LAN + ADB" else "ADB only"
@@ -245,7 +294,9 @@ class BridgeService : Service(), NativeAgent.Callbacks {
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
-            .setContentText("$mode · port $port · $devices USB device(s)")
+            .setContentText(
+                if (mirroring != null) "$computersText · $devices USB device(s)" else "$mode · port $port · $devices USB device(s)"
+            )
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
@@ -255,6 +306,9 @@ class BridgeService : Service(), NativeAgent.Callbacks {
     override fun onDestroy() {
         instance = null
         running = false
+        displayWatcher.stop()
+        mirrorOutput.stopAll()
+        unregisterReceiver(screenReceiver)
         unregisterReceiver(usbReceiver)
         for (c in connections.values) c.close()
         connections.clear()
@@ -300,6 +354,14 @@ class BridgeService : Service(), NativeAgent.Callbacks {
             if (!isRunning) return null
             val s = NativeAgent.status()
             return if (s.isEmpty()) null else try { JSONObject(s) } catch (_: Exception) { null }
+        }
+
+        /** The sessions that are computers: a mirror's video connection is not another one. */
+        fun computers(status: JSONObject?): List<JSONObject> = sessions(status).filter { !it.optBoolean("media") }
+
+        fun sessions(status: JSONObject?): List<JSONObject> {
+            val all = status?.optJSONArray("sessions") ?: return emptyList()
+            return (0 until all.length()).map { all.getJSONObject(it) }
         }
 
         fun send(context: Context, action: String, lan: Boolean = lanMode) {

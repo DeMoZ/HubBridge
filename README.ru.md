@@ -16,7 +16,7 @@ Android-агент (Kotlin + ядро на Rust) · приложение для 
 ## Установка
 
 Скачайте из [релизов](https://github.com/DeMoZ/HubBridge/releases). Сборки для macOS — под
-Apple Silicon (macOS 11+). Скачиваемых файлов для Windows пока нет: на Windows HubBridge
+Apple Silicon (macOS 13 или новее). Скачиваемых файлов для Windows пока нет: на Windows HubBridge
 запускается только из исходников.
 
 1. **Приложение для macOS.** Откройте `HubBridge-macOS-v<версия>.dmg` и перетащите HubBridge в

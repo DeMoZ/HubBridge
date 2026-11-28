@@ -15,9 +15,11 @@ use hubbridge_proto::{Setup, UsbStatus, descriptors};
 use tokio::sync::oneshot;
 
 pub mod serial;
+pub mod video;
 
 use serial::SerialState;
 pub use serial::{LineErrorKind, ModemLines, SerialChip, SerialDecoded, SerialEvent};
+pub use video::{FakeVideoSink, StreamLog};
 
 use crate::usb::{BoxFut, TransferResult, UsbBackend, UsbDevice, UsbError};
 
